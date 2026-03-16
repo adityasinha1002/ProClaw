@@ -49,14 +49,14 @@ async function ensureApiKey() {
   }
 
   console.log("");
-  console.log("  ┌───────────────────────────────────────────────┐");
-  console.log("  │  NVIDIA API Key required                      │");
-  console.log("  │                                               │");
-  console.log("  │  1. Go to https://build.nvidia.com            │");
-  console.log("  │  2. Sign in with your NVIDIA account          │");
-  console.log("  │  3. Click any model -> 'Get API Key'          │");
-  console.log("  │  4. Paste the key below (starts with nvapi-)  │");
-  console.log("  └───────────────────────────────────────────────┘");
+  console.log("  ┌─────────────────────────────────────────────────────────────────┐");
+  console.log("  │  NVIDIA API Key required                                        │");
+  console.log("  │                                                                 │");
+  console.log("  │  1. Go to https://build.nvidia.com/settings/api-keys            │");
+  console.log("  │  2. Sign in with your NVIDIA account                            │");
+  console.log("  │  3. Click 'Generate API Key' button                             │");
+  console.log("  │  4. Paste the key below (starts with nvapi-)                    │");
+  console.log("  └─────────────────────────────────────────────────────────────────┘");
   console.log("");
 
   key = await prompt("  NVIDIA API Key: ");
