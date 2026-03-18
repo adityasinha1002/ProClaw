@@ -593,7 +593,11 @@ async function setupNim(sandboxName, gpu) {
       }
       console.log("  ✓ Using Ollama on localhost:11434");
       provider = "ollama-local";
-      model = await promptOllamaModel();
+      if (isNonInteractive()) {
+        model = requestedModel || getDefaultOllamaModel(runCapture);
+      } else {
+        model = await promptOllamaModel();
+      }
     } else if (selected.key === "install-ollama") {
       console.log("  Installing Ollama via Homebrew...");
       run("brew install ollama", { ignoreError: true });
@@ -602,7 +606,11 @@ async function setupNim(sandboxName, gpu) {
         sleep(2);
       console.log("  ✓ Using Ollama on localhost:11434");
       provider = "ollama-local";
-      model = await promptOllamaModel();
+      if (isNonInteractive()) {
+        model = requestedModel || getDefaultOllamaModel(runCapture);
+      } else {
+        model = await promptOllamaModel();
+      }
     } else if (selected.key === "vllm") {
       console.log("  ✓ Using existing vLLM on localhost:8000");
       provider = "vllm-local";
