@@ -82,18 +82,41 @@ PYAUTH
 lock_gateway_config() {
   # Lock openclaw.json so the sandboxed agent (running as "sandbox" user)
   # cannot modify auth tokens, CORS origins, or other gateway security
-  # settings.  The gateway process (running as root) retains read access,
-  # and root bypasses DAC so any late writes (e.g. token generation) still
-  # succeed.
+  # settings.  In the standard (non-exec) path the gateway runs in the
+  # background and may overwrite the config to generate an auth token, so
+  # we poll for the token before locking to avoid a race condition.
   # Ref: https://github.com/NVIDIA/NemoClaw/issues/514
-  local config_path
+  local config_path config_dir
   config_path="$(python3 -c "import os; print(os.path.join(os.environ.get('HOME', '/sandbox'), '.openclaw', 'openclaw.json'))")"
+  config_dir="$(dirname "$config_path")"
 
-  if [ -f "$config_path" ]; then
-    chown root:root "$config_path"
-    chmod 444 "$config_path"
-    echo "[security] gateway config locked: $config_path"
+  if [ ! -f "$config_path" ]; then
+    return
   fi
+
+  # Wait for the gateway to finish its initial config write (token generation).
+  # In the exec path the gateway hasn't started yet so this exits immediately.
+  local i
+  for i in $(seq 1 30); do
+    if python3 -c "
+import json, sys
+cfg = json.load(open('$config_path'))
+sys.exit(0 if cfg.get('gateway',{}).get('auth',{}).get('token') else 1)
+" 2>/dev/null; then
+      break
+    fi
+    sleep 1
+  done
+
+  # Lock the config file
+  chown root:root "$config_path"
+  chmod 444 "$config_path"
+
+  # Lock the parent directory so the agent cannot delete and recreate the file
+  chown root:root "$config_dir"
+  chmod 555 "$config_dir"
+
+  echo "[security] gateway config locked: $config_path"
 }
 
 print_dashboard_urls() {
