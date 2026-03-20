@@ -500,7 +500,7 @@ async function cliOnboard(opts) {
         try {
             resolvedImage = (0, nim_js_1.pullNimImage)(model, runtime);
             logger.info("Starting local NIM container...");
-            (0, nim_js_1.startNimContainer)(opts.pluginConfig.sandboxName, model, runtime, 8000, resolvedImage);
+            (0, nim_js_1.startNimContainer)(opts.pluginConfig.sandboxName, model, runtime, 8000, resolvedImage, selectedAssessment?.matchedProfile?.minDiskSpaceGB);
         }
         catch (err) {
             logger.error(`Failed to launch local NIM container: ${err instanceof Error ? err.message : String(err)}`);

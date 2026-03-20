@@ -689,7 +689,13 @@ async function setupNim(sandboxName, gpu) {
         const resolvedImage = nim.pullNimImage(model);
 
         console.log("  Starting NIM container...");
-        nimContainer = nim.startNimContainer(sandboxName, model, 8000, resolvedImage);
+        nimContainer = nim.startNimContainer(
+          sandboxName,
+          model,
+          8000,
+          resolvedImage,
+          sel.matchedProfile?.minDiskSpaceGB ?? null,
+        );
 
         console.log("  Waiting for NIM to become healthy...");
         const startup = nim.monitorNimStartup(sandboxName, 8000, 1200, 14400);

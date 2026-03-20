@@ -208,6 +208,7 @@ describe("cliOnboard", () => {
       expect.any(Object),
       8000,
       "nvcr.io/nim/nvidia/nemotron-3-nano:latest",
+      undefined,
     );
     expect(localInference.validateLocalProvider).toHaveBeenCalledWith(
       "nim-local",

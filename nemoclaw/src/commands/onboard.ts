@@ -618,7 +618,14 @@ export async function cliOnboard(opts: OnboardOptions): Promise<void> {
     try {
       resolvedImage = pullNimImage(model, runtime);
       logger.info("Starting local NIM container...");
-      startNimContainer(opts.pluginConfig.sandboxName, model, runtime, 8000, resolvedImage);
+      startNimContainer(
+        opts.pluginConfig.sandboxName,
+        model,
+        runtime,
+        8000,
+        resolvedImage,
+        selectedAssessment?.matchedProfile?.minDiskSpaceGB,
+      );
     } catch (err) {
       logger.error(`Failed to launch local NIM container: ${err instanceof Error ? err.message : String(err)}`);
       return;

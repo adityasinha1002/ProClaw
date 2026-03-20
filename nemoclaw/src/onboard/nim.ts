@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { execSync } from "node:child_process";
+import path from "node:path";
 import nimImages from "../../../bin/lib/nim-images.json";
 
 export interface GpuInfo {
@@ -118,6 +119,54 @@ function shellQuote(value: string): string {
   return `'${value.replace(/'/g, `'\\''`)}'`;
 }
 
+function getNimCacheCandidatePaths(): string[] {
+  const candidates: string[] = [];
+  const seen = new Set<string>();
+  const user = process.env.USER || "user";
+  const push = (candidate?: string | null): void => {
+    if (!candidate) return;
+    const normalized = candidate.trim();
+    if (!normalized || seen.has(normalized)) return;
+    seen.add(normalized);
+    candidates.push(normalized);
+  };
+
+  push(process.env.NEMOCLAW_NIM_CACHE_DIR);
+  push(process.env.LOCAL_NIM_CACHE);
+
+  const xdgCacheHome = process.env.XDG_CACHE_HOME?.trim();
+  if (xdgCacheHome) {
+    push(path.join(xdgCacheHome, "nim"));
+  }
+
+  const home = process.env.HOME?.trim();
+  if (home) {
+    push(path.join(home, ".cache", "nim"));
+    push(path.join(home, ".local", "share", "nim-cache"));
+  }
+
+  for (const root of ["/workspace", "/data", "/scratch", "/mnt", "/media", "/Volumes", "/var/tmp", "/tmp"]) {
+    push(path.join(root, `nemoclaw-nim-cache-${user}`));
+  }
+
+  return candidates;
+}
+
+function detectPathFreeDiskGB(runtime: NimRuntime, targetPath: string): number | null {
+  const availableKB = tryExec(runtime, `df -Pk ${shellQuote(targetPath)} | awk 'NR==2 {print $4}'`);
+  const available = parseInt(availableKB, 10);
+  if (!Number.isFinite(available) || available <= 0) {
+    return null;
+  }
+  return Math.floor(available / 1024 / 1024);
+}
+
+function isWritableDirectory(runtime: NimRuntime, targetPath: string): boolean {
+  return (
+    tryExec(runtime, `mkdir -p ${shellQuote(targetPath)} && test -w ${shellQuote(targetPath)} && printf ok`) === "ok"
+  );
+}
+
 const NIM_FATAL_LOG_PATTERNS: Array<{ pattern: RegExp; reason: string }> = [
   {
     pattern: /error decoding response body/i,
@@ -173,6 +222,51 @@ function getContainerCredentialArgs(): string[] {
     credentials.push(`-e NGC_API_KEY=${shellQuote(effectiveNgcApiKey)}`);
   }
   return credentials;
+}
+
+function getModelCacheRequirementGB(modelName: string, overrideDiskGB?: number | null): number {
+  if (typeof overrideDiskGB === "number" && overrideDiskGB > 0) {
+    return overrideDiskGB;
+  }
+  const model = listModels().find((entry) => entry.name === modelName);
+  const requirements = (model?.profiles ?? [])
+    .map((profile) => profile.minDiskSpaceGB ?? 0)
+    .filter((value) => value > 0);
+  return requirements.length > 0 ? Math.min(...requirements) : 0;
+}
+
+function resolveNimCacheDirectory(
+  runtime: NimRuntime,
+  modelName?: string,
+  requiredDiskGB?: number | null,
+): { hostPath: string; freeDiskGB: number | null } | null {
+  const required = getModelCacheRequirementGB(modelName ?? "", requiredDiskGB);
+  const reserveGB = required > 0 ? 20 : 10;
+  let best: { hostPath: string; freeDiskGB: number | null } | null = null;
+
+  for (const candidate of getNimCacheCandidatePaths()) {
+    if (!isWritableDirectory(runtime, candidate)) {
+      continue;
+    }
+    const freeDiskGB = detectPathFreeDiskGB(runtime, candidate);
+    if (
+      process.env.NEMOCLAW_NIM_CACHE_DIR?.trim() === candidate ||
+      process.env.LOCAL_NIM_CACHE?.trim() === candidate
+    ) {
+      return { hostPath: candidate, freeDiskGB };
+    }
+    if (freeDiskGB !== null && freeDiskGB >= required + reserveGB) {
+      if (!best || (best.freeDiskGB ?? -1) < freeDiskGB) {
+        best = { hostPath: candidate, freeDiskGB };
+      }
+      continue;
+    }
+    if (!best || (best.freeDiskGB ?? -1) < (freeDiskGB ?? -1)) {
+      best = { hostPath: candidate, freeDiskGB };
+    }
+  }
+
+  return best;
 }
 
 export function containerName(sandboxName: string): string {
@@ -308,13 +402,12 @@ export function pullNimImage(model: string, runtime: NimRuntime): string {
 }
 
 export function detectDiskSpaceGB(runtime: NimRuntime): number | null {
-  const dockerRoot = tryExec(runtime, "docker info --format '{{.DockerRootDir}}' 2>/dev/null") || "/var/lib/docker";
-  const availableKB = tryExec(runtime, `df -Pk ${shellQuote(dockerRoot)} | awk 'NR==2 {print $4}'`);
-  const available = parseInt(availableKB, 10);
-  if (!Number.isFinite(available) || available <= 0) {
-    return null;
+  const cacheDir = resolveNimCacheDirectory(runtime);
+  if (cacheDir?.freeDiskGB !== null && cacheDir?.freeDiskGB !== undefined) {
+    return cacheDir.freeDiskGB;
   }
-  return Math.floor(available / 1024 / 1024);
+  const dockerRoot = tryExec(runtime, "docker info --format '{{.DockerRootDir}}' 2>/dev/null") || "/var/lib/docker";
+  return detectPathFreeDiskGB(runtime, dockerRoot);
 }
 
 function profileMatches(profile: NimProfile, gpu: GpuInfo, freeDiskGB: number | null): boolean {
@@ -612,6 +705,7 @@ export function startNimContainer(
   runtime: NimRuntime,
   port = 8000,
   imageOverride?: string,
+  requiredDiskGB?: number | null,
 ): string {
   const name = containerName(sandboxName);
   const image = imageOverride ?? getImageForModel(model);
@@ -620,8 +714,13 @@ export function startNimContainer(
   }
 
   tryExec(runtime, `docker rm -f ${name} 2>/dev/null`);
-  const credentialArgs = getContainerCredentialArgs();
-  const envArgs = credentialArgs.length > 0 ? `${credentialArgs.join(" ")} ` : "";
+  const runArgs = getContainerCredentialArgs();
+  const cacheDir = resolveNimCacheDirectory(runtime, model, requiredDiskGB);
+  if (cacheDir) {
+    runArgs.push(`-e NIM_CACHE_PATH=${shellQuote("/opt/nim/.cache")}`);
+    runArgs.push(`-v ${shellQuote(cacheDir.hostPath)}:/opt/nim/.cache`);
+  }
+  const envArgs = runArgs.length > 0 ? `${runArgs.join(" ")} ` : "";
   runtime.exec(
     `docker run -d --gpus all -p ${String(port)}:8000 --name ${name} --shm-size 16g ${envArgs}${image}`,
   );

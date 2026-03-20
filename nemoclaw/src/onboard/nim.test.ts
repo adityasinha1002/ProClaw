@@ -144,9 +144,49 @@ describe("nim helpers", () => {
       return "";
     };
     startNimContainer("openclaw", "nvidia/nemotron-3-nano-30b-a3b", runtime);
+    expect(commands[0]).toBe("docker rm -f nemoclaw-nim-openclaw 2>/dev/null");
+    expect(commands.at(-1)).toBe(
+      "docker run -d --gpus all -p 8000:8000 --name nemoclaw-nim-openclaw --shm-size 16g nvcr.io/nim/nvidia/nemotron-3-nano:latest",
+    );
+  });
+
+  it("mounts a writable cache directory when one with enough space is available", () => {
+    const originalCacheDir = process.env.NEMOCLAW_NIM_CACHE_DIR;
+    process.env.NEMOCLAW_NIM_CACHE_DIR = "/cache/nim";
+
+    const commands: string[] = [];
+    const runtime = runtimeWithResponses(
+      {
+        "mkdir -p '/cache/nim' && test -w '/cache/nim' && printf ok": "ok",
+        "df -Pk '/cache/nim' | awk 'NR==2 {print $4}'": String(400 * 1024 * 1024),
+      },
+      commands,
+    );
+    runtime.exec = (command: string) => {
+      commands.push(command);
+      for (const [pattern, response] of Object.entries({
+        "mkdir -p '/cache/nim' && test -w '/cache/nim' && printf ok": "ok",
+        "df -Pk '/cache/nim' | awk 'NR==2 {print $4}'": String(400 * 1024 * 1024),
+      })) {
+        if (command.includes(pattern)) {
+          return response;
+        }
+      }
+      return "";
+    };
+
+    try {
+      startNimContainer("openclaw", "nvidia/nemotron-3-nano-30b-a3b", runtime, 8000, undefined, 32);
+    } finally {
+      if (originalCacheDir === undefined) delete process.env.NEMOCLAW_NIM_CACHE_DIR;
+      else process.env.NEMOCLAW_NIM_CACHE_DIR = originalCacheDir;
+    }
+
     expect(commands).toEqual([
       "docker rm -f nemoclaw-nim-openclaw 2>/dev/null",
-      "docker run -d --gpus all -p 8000:8000 --name nemoclaw-nim-openclaw --shm-size 16g nvcr.io/nim/nvidia/nemotron-3-nano:latest",
+      "mkdir -p '/cache/nim' && test -w '/cache/nim' && printf ok",
+      "df -Pk '/cache/nim' | awk 'NR==2 {print $4}'",
+      "docker run -d --gpus all -p 8000:8000 --name nemoclaw-nim-openclaw --shm-size 16g -e NIM_CACHE_PATH='/opt/nim/.cache' -v '/cache/nim':/opt/nim/.cache nvcr.io/nim/nvidia/nemotron-3-nano:latest",
     ]);
   });
 
@@ -172,10 +212,10 @@ describe("nim helpers", () => {
       else process.env.NVIDIA_API_KEY = originalNvidiaApiKey;
     }
 
-    expect(commands).toEqual([
-      "docker rm -f nemoclaw-nim-openclaw 2>/dev/null",
+    expect(commands[0]).toBe("docker rm -f nemoclaw-nim-openclaw 2>/dev/null");
+    expect(commands.at(-1)).toBe(
       "docker run -d --gpus all -p 8000:8000 --name nemoclaw-nim-openclaw --shm-size 16g -e NVIDIA_API_KEY='nvapi-secret' -e NGC_API_KEY='ngc-secret' nvcr.io/nim/nvidia/nemotron-3-nano:latest",
-    ]);
+    );
   });
 
   it("mirrors NVIDIA_API_KEY into NGC_API_KEY when only NVIDIA_API_KEY is set", () => {
@@ -200,10 +240,10 @@ describe("nim helpers", () => {
       else process.env.NVIDIA_API_KEY = originalNvidiaApiKey;
     }
 
-    expect(commands).toEqual([
-      "docker rm -f nemoclaw-nim-openclaw 2>/dev/null",
+    expect(commands[0]).toBe("docker rm -f nemoclaw-nim-openclaw 2>/dev/null");
+    expect(commands.at(-1)).toBe(
       "docker run -d --gpus all -p 8000:8000 --name nemoclaw-nim-openclaw --shm-size 16g -e NVIDIA_API_KEY='nvapi-secret' -e NGC_API_KEY='nvapi-secret' nvcr.io/nim/nvidia/nemotron-3-nano:latest",
-    ]);
+    );
   });
 
   it("passes health checks when the models endpoint responds", () => {

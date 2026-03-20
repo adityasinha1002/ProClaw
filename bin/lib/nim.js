@@ -3,6 +3,7 @@
 //
 // NIM container management — pull, start, stop, health-check NIM images.
 
+const path = require("node:path");
 const runner = require("./runner");
 const nimImages = require("./nim-images.json");
 const MODEL_PULL_FALLBACKS = {
@@ -55,6 +56,56 @@ function shellQuote(value) {
   return `'${String(value).replace(/'/g, `'\\''`)}'`;
 }
 
+function getNimCacheCandidatePaths() {
+  const candidates = [];
+  const seen = new Set();
+  const user = process.env.USER || "user";
+  const push = (candidate) => {
+    if (!candidate) return;
+    const normalized = String(candidate).trim();
+    if (!normalized || seen.has(normalized)) return;
+    seen.add(normalized);
+    candidates.push(normalized);
+  };
+
+  push(process.env.NEMOCLAW_NIM_CACHE_DIR);
+  push(process.env.LOCAL_NIM_CACHE);
+
+  if (process.env.XDG_CACHE_HOME) {
+    push(path.join(process.env.XDG_CACHE_HOME, "nim"));
+  }
+  if (process.env.HOME) {
+    push(path.join(process.env.HOME, ".cache", "nim"));
+    push(path.join(process.env.HOME, ".local", "share", "nim-cache"));
+  }
+  for (const root of ["/workspace", "/data", "/scratch", "/mnt", "/media", "/Volumes", "/var/tmp", "/tmp"]) {
+    push(path.join(root, `nemoclaw-nim-cache-${user}`));
+  }
+
+  return candidates;
+}
+
+function detectPathFreeDiskGB(targetPath) {
+  try {
+    const availableKB = runner.runCapture(`df -Pk ${shellQuote(targetPath)} | awk 'NR==2 {print $4}'`, {
+      ignoreError: true,
+    });
+    const available = parseInt(availableKB, 10);
+    if (!isNaN(available) && available > 0) {
+      return Math.floor(available / 1024 / 1024);
+    }
+  } catch {}
+  return null;
+}
+
+function isWritableDirectory(targetPath) {
+  return (
+    runner.runCapture(`mkdir -p ${shellQuote(targetPath)} && test -w ${shellQuote(targetPath)} && printf ok`, {
+      ignoreError: true,
+    }) === "ok"
+  );
+}
+
 const NIM_FATAL_LOG_PATTERNS = [
   {
     pattern: /error decoding response body/i,
@@ -99,6 +150,45 @@ function getContainerCredentialArgs() {
   return args;
 }
 
+function getModelCacheRequirementGB(modelName, overrideDiskGB) {
+  if (typeof overrideDiskGB === "number" && overrideDiskGB > 0) {
+    return overrideDiskGB;
+  }
+  const model = listModels().find((entry) => entry.name === modelName);
+  const requirements = (model?.profiles || [])
+    .map((profile) => profile.minDiskSpaceGB || 0)
+    .filter((value) => value > 0);
+  return requirements.length > 0 ? Math.min(...requirements) : 0;
+}
+
+function resolveNimCacheDirectory(modelName, requiredDiskGB) {
+  const required = getModelCacheRequirementGB(modelName || "", requiredDiskGB);
+  const reserveGB = required > 0 ? 20 : 10;
+  let best = null;
+
+  for (const candidate of getNimCacheCandidatePaths()) {
+    if (!isWritableDirectory(candidate)) continue;
+    const freeDiskGB = detectPathFreeDiskGB(candidate);
+    if (
+      (process.env.NEMOCLAW_NIM_CACHE_DIR || "").trim() === candidate ||
+      (process.env.LOCAL_NIM_CACHE || "").trim() === candidate
+    ) {
+      return { hostPath: candidate, freeDiskGB };
+    }
+    if (freeDiskGB !== null && freeDiskGB >= required + reserveGB) {
+      if (!best || (best.freeDiskGB ?? -1) < freeDiskGB) {
+        best = { hostPath: candidate, freeDiskGB };
+      }
+      continue;
+    }
+    if (!best || (best.freeDiskGB ?? -1) < (freeDiskGB ?? -1)) {
+      best = { hostPath: candidate, freeDiskGB };
+    }
+  }
+
+  return best;
+}
+
 function listModels() {
   return nimImages.models.map((m) => ({
     name: m.name,
@@ -112,23 +202,17 @@ function listModels() {
 }
 
 function detectDiskSpaceGB() {
+  const cacheDir = resolveNimCacheDirectory();
+  if (cacheDir && cacheDir.freeDiskGB !== null && cacheDir.freeDiskGB !== undefined) {
+    return cacheDir.freeDiskGB;
+  }
   let dockerRoot = "";
   try {
     dockerRoot = runner.runCapture("docker info --format '{{.DockerRootDir}}'", {
       ignoreError: true,
     });
   } catch {}
-  const diskPath = dockerRoot || "/var/lib/docker";
-  try {
-    const availableKB = runner.runCapture(`df -Pk ${shellQuote(diskPath)} | awk 'NR==2 {print $4}'`, {
-      ignoreError: true,
-    });
-    const available = parseInt(availableKB, 10);
-    if (!isNaN(available) && available > 0) {
-      return Math.floor(available / 1024 / 1024);
-    }
-  } catch {}
-  return null;
+  return detectPathFreeDiskGB(dockerRoot || "/var/lib/docker");
 }
 
 function profileMatches(profile, gpu, freeDiskGB) {
@@ -485,7 +569,7 @@ function pullNimImage(model) {
   return null;
 }
 
-function startNimContainer(sandboxName, model, port = 8000, imageOverride = null) {
+function startNimContainer(sandboxName, model, port = 8000, imageOverride = null, requiredDiskGB = null) {
   const name = containerName(sandboxName);
   const image = imageOverride || getImageForModel(model);
   if (!image) {
@@ -498,6 +582,11 @@ function startNimContainer(sandboxName, model, port = 8000, imageOverride = null
 
   console.log(`  Starting NIM container: ${name}`);
   const envArgs = getContainerCredentialArgs();
+  const cacheDir = resolveNimCacheDirectory(model, requiredDiskGB);
+  if (cacheDir) {
+    envArgs.push(`-e NIM_CACHE_PATH=${shellQuote("/opt/nim/.cache")}`);
+    envArgs.push(`-v ${shellQuote(cacheDir.hostPath)}:/opt/nim/.cache`);
+  }
   runner.run(
     `docker run -d --gpus all -p ${port}:8000 --name ${name} --shm-size 16g ${envArgs.join(" ")} ${image}`.trim()
   );

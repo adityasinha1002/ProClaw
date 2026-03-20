@@ -302,6 +302,45 @@ describe("nim", () => {
     });
   });
 
+  describe("startNimContainer", () => {
+    it("mounts a writable cache directory when one with enough space is available", () => {
+      const runnerPath = path.join(__dirname, "..", "bin", "lib", "runner.js");
+      const runner = require(runnerPath);
+      const originalRun = runner.run;
+      const originalRunCapture = runner.runCapture;
+      const originalCacheDir = process.env.NEMOCLAW_NIM_CACHE_DIR;
+      process.env.NEMOCLAW_NIM_CACHE_DIR = "/cache/nim";
+      const commands = [];
+
+      runner.runCapture = (command) => {
+        commands.push(command);
+        if (command.includes("mkdir -p '/cache/nim' && test -w '/cache/nim' && printf ok")) return "ok";
+        if (command.includes("df -Pk '/cache/nim' | awk 'NR==2 {print $4}'")) return String(400 * 1024 * 1024);
+        return "";
+      };
+      runner.run = (command) => {
+        commands.push(command);
+        return { status: 0 };
+      };
+
+      try {
+        nim.startNimContainer("openclaw", "nvidia/nemotron-3-nano-30b-a3b", 8000, null, 32);
+      } finally {
+        runner.run = originalRun;
+        runner.runCapture = originalRunCapture;
+        if (originalCacheDir === undefined) delete process.env.NEMOCLAW_NIM_CACHE_DIR;
+        else process.env.NEMOCLAW_NIM_CACHE_DIR = originalCacheDir;
+      }
+
+      assert.deepEqual(commands, [
+        "docker rm -f nemoclaw-nim-openclaw 2>/dev/null || true",
+        "mkdir -p '/cache/nim' && test -w '/cache/nim' && printf ok",
+        "df -Pk '/cache/nim' | awk 'NR==2 {print $4}'",
+        "docker run -d --gpus all -p 8000:8000 --name nemoclaw-nim-openclaw --shm-size 16g -e NIM_CACHE_PATH='/opt/nim/.cache' -v '/cache/nim':/opt/nim/.cache nvcr.io/nim/nvidia/nemotron-3-nano:latest",
+      ]);
+    });
+  });
+
   describe("nimStatus", () => {
     it("returns not running for nonexistent container", () => {
       const st = nim.nimStatus("nonexistent-test-xyz");
