@@ -122,6 +122,12 @@ describe("shell runtime helpers", () => {
     assert.equal(result.stdout.trim(), "http://host.openshell.internal:8000/v1");
   });
 
+  it("returns the nim-local base URL", () => {
+    const result = runShell(`source "${RUNTIME_SH}"; get_local_provider_base_url nim-local`);
+    assert.equal(result.status, 0);
+    assert.equal(result.stdout.trim(), "http://host.openshell.internal:8000/v1");
+  });
+
   it("returns the ollama-local base URL", () => {
     const result = runShell(`source "${RUNTIME_SH}"; get_local_provider_base_url ollama-local`);
     assert.equal(result.status, 0);

@@ -67,7 +67,7 @@ The sandbox image is approximately 2.4 GB compressed. During image push, the Doc
 ### Install NemoClaw and Onboard OpenClaw Agent
 
 Download and run the installer script.
-The script installs Node.js if it is not already present, then runs the guided onboard wizard to create a sandbox, configure inference, and apply security policies.
+The script installs Node.js if it is not already present, then runs the guided onboard wizard to create a sandbox, configure inference, and apply security policies. The guided flow supports NVIDIA Cloud API, managed local NIM containers on NVIDIA GPUs, and local Ollama.
 
 ```bash
 curl -fsSL https://www.nvidia.com/nemoclaw.sh | bash

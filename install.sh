@@ -2,7 +2,8 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
-# NemoClaw installer — installs Node.js, Ollama (if GPU present), and NemoClaw.
+# NemoClaw installer — installs Node.js, NemoClaw, and then runs guided onboarding
+# for NVIDIA Cloud API, local NIM, or local Ollama inference.
 
 set -euo pipefail
 
@@ -338,6 +339,7 @@ main() {
   export NEMOCLAW_NON_INTERACTIVE="${NON_INTERACTIVE}"
 
   info "=== NemoClaw Installer ==="
+  info "Onboarding supports NVIDIA Cloud API, local NIM containers, and local Ollama."
 
   install_nodejs
   ensure_supported_runtime

@@ -206,6 +206,7 @@ get_local_provider_base_url() {
   local provider="${1:-}"
 
   case "$provider" in
+    nim-local) printf 'http://host.openshell.internal:8000/v1\n' ;;
     vllm-local) printf 'http://host.openshell.internal:8000/v1\n' ;;
     ollama-local) printf 'http://host.openshell.internal:11434/v1\n' ;;
     *) return 1 ;;
@@ -216,6 +217,9 @@ check_local_provider_health() {
   local provider="${1:-}"
 
   case "$provider" in
+    nim-local)
+      curl -sf http://localhost:8000/v1/models > /dev/null 2>&1
+      ;;
     vllm-local)
       curl -sf http://localhost:8000/v1/models > /dev/null 2>&1
       ;;

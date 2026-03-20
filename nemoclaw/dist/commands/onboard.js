@@ -5,15 +5,16 @@ Object.defineProperty(exports, "__esModule", { value: true });
 exports.cliOnboard = cliOnboard;
 const node_child_process_1 = require("node:child_process");
 const config_js_1 = require("../onboard/config.js");
+const local_inference_js_1 = require("../onboard/local-inference.js");
+const nim_js_1 = require("../onboard/nim.js");
 const prompt_js_1 = require("../onboard/prompt.js");
 const validate_js_1 = require("../onboard/validate.js");
 const ENDPOINT_TYPES = ["build", "ncp", "nim-local", "vllm", "ollama", "custom"];
-const SUPPORTED_ENDPOINT_TYPES = ["build", "ncp", "ollama"];
+const SUPPORTED_ENDPOINT_TYPES = ["build", "ncp", "nim-local", "ollama"];
 function isExperimentalEnabled() {
     return process.env.NEMOCLAW_EXPERIMENTAL === "1";
 }
 const BUILD_ENDPOINT_URL = "https://integrate.api.nvidia.com/v1";
-const HOST_GATEWAY_URL = "http://host.openshell.internal";
 const DEFAULT_MODELS = [
     { id: "nvidia/nemotron-3-super-120b-a12b", label: "Nemotron 3 Super 120B" },
     { id: "moonshotai/kimi-k2.5", label: "Kimi K2.5" },
@@ -22,7 +23,6 @@ const DEFAULT_MODELS = [
     { id: "qwen/qwen3.5-397b-a17b", label: "Qwen3.5 397B A17B" },
     { id: "openai/gpt-oss-120b", label: "GPT-OSS 120B" },
 ];
-const DEFAULT_OLLAMA_MODEL = "nemotron-3-nano:30b";
 function resolveProfile(endpointType) {
     switch (endpointType) {
         case "build":
@@ -60,7 +60,6 @@ function resolveCredentialEnv(endpointType) {
         case "custom":
             return "NVIDIA_API_KEY";
         case "nim-local":
-            return "NIM_API_KEY";
         case "vllm":
         case "ollama":
             return "OPENAI_API_KEY";
@@ -72,7 +71,7 @@ function isNonInteractive(opts) {
     const ep = opts.endpoint;
     if (endpointRequiresApiKey(ep) && !opts.apiKey)
         return false;
-    if ((ep === "ncp" || ep === "nim-local" || ep === "custom") && !opts.endpointUrl)
+    if ((ep === "ncp" || ep === "custom") && !opts.endpointUrl)
         return false;
     if (ep === "ncp" && !opts.ncpPartner)
         return false;
@@ -81,11 +80,11 @@ function isNonInteractive(opts) {
 function endpointRequiresApiKey(endpointType) {
     return (endpointType === "build" ||
         endpointType === "ncp" ||
-        endpointType === "nim-local" ||
         endpointType === "custom");
 }
 function defaultCredentialForEndpoint(endpointType) {
     switch (endpointType) {
+        case "nim-local":
         case "vllm":
             return "dummy";
         case "ollama":
@@ -99,30 +98,6 @@ function detectOllama() {
     const running = testCommand("curl -sf http://localhost:11434/api/tags >/dev/null 2>&1");
     return { installed, running };
 }
-function parseOllamaList(output) {
-    return output
-        .split(/\r?\n/)
-        .map((line) => line.trim())
-        .filter(Boolean)
-        .filter((line) => !/^NAME\s+/i.test(line))
-        .map((line) => line.split(/\s{2,}/)[0])
-        .filter(Boolean);
-}
-function getOllamaModelOptions() {
-    try {
-        const output = (0, node_child_process_1.execSync)("ollama list", { encoding: "utf-8", shell: "/bin/bash" });
-        const parsed = parseOllamaList(output);
-        if (parsed.length > 0) {
-            return parsed;
-        }
-    }
-    catch { }
-    return [DEFAULT_OLLAMA_MODEL];
-}
-function getDefaultOllamaModel() {
-    const models = getOllamaModelOptions();
-    return models.includes(DEFAULT_OLLAMA_MODEL) ? DEFAULT_OLLAMA_MODEL : models[0];
-}
 function testCommand(command) {
     try {
         (0, node_child_process_1.execSync)(command, { encoding: "utf-8", stdio: "ignore", shell: "/bin/bash" });
@@ -131,6 +106,46 @@ function testCommand(command) {
     catch {
         return false;
     }
+}
+function runCapture(command) {
+    try {
+        return (0, node_child_process_1.execSync)(command, { encoding: "utf-8", stdio: ["ignore", "pipe", "ignore"], shell: "/bin/bash" }).trim();
+    }
+    catch {
+        return "";
+    }
+}
+function detectLocalNim() {
+    const runtime = (0, nim_js_1.createNimRuntime)();
+    if (!testCommand("command -v docker >/dev/null 2>&1")) {
+        return { available: false, reason: "Docker not found" };
+    }
+    if (!testCommand("docker info >/dev/null 2>&1")) {
+        return { available: false, reason: "Docker daemon not running" };
+    }
+    const gpu = (0, nim_js_1.detectGpu)(runtime);
+    if (!gpu || !gpu.nimCapable) {
+        return { available: false, reason: "No NIM-capable NVIDIA GPU detected" };
+    }
+    const compatibleModels = (0, nim_js_1.listModels)().filter((model) => model.minGpuMemoryMB <= gpu.totalMemoryMB);
+    if (compatibleModels.length === 0) {
+        return {
+            available: false,
+            reason: `GPU detected (${Math.floor(gpu.totalMemoryMB / 1024)} GB), but no bundled NIM models fit`,
+        };
+    }
+    return {
+        available: true,
+        gpuSummary: `${Math.floor(gpu.totalMemoryMB / 1024)} GB VRAM, ${String(compatibleModels.length)} supported model(s)`,
+    };
+}
+function getCompatibleNimModels() {
+    const runtime = (0, nim_js_1.createNimRuntime)();
+    const gpu = (0, nim_js_1.detectGpu)(runtime);
+    if (!gpu || !gpu.nimCapable) {
+        return [];
+    }
+    return (0, nim_js_1.listModels)().filter((model) => model.minGpuMemoryMB <= gpu.totalMemoryMB);
 }
 function showConfig(config, logger) {
     logger.info(`  Endpoint:    ${(0, config_js_1.describeOnboardEndpoint)(config)}`);
@@ -143,7 +158,7 @@ function showConfig(config, logger) {
     logger.info(`  Profile:     ${config.profile}`);
     logger.info(`  Onboarded:   ${config.onboardedAt}`);
 }
-async function promptEndpoint(ollama) {
+async function promptEndpoint(ollama, nim) {
     const options = [
         {
             label: "NVIDIA Build (build.nvidia.com)",
@@ -156,6 +171,13 @@ async function promptEndpoint(ollama) {
             hint: "dedicated capacity, SLA-backed",
         },
     ];
+    if (nim.available) {
+        options.push({
+            label: "Local NIM",
+            value: "nim-local",
+            hint: `managed local container — ${nim.gpuSummary}`,
+        });
+    }
     options.push({
         label: "Local Ollama",
         value: "ollama",
@@ -167,10 +189,6 @@ async function promptEndpoint(ollama) {
     });
     if (isExperimentalEnabled()) {
         options.push({
-            label: "Self-hosted NIM [experimental]",
-            value: "nim-local",
-            hint: "experimental — your own NIM container deployment",
-        }, {
             label: "Local vLLM [experimental]",
             value: "vllm",
             hint: "experimental — local development",
@@ -183,6 +201,22 @@ function execOpenShell(args) {
         encoding: "utf-8",
         stdio: ["pipe", "pipe", "pipe"],
     });
+}
+function verifyInferenceRoute(providerName, model, logger) {
+    try {
+        const output = execOpenShell(["inference", "get", "--json"]);
+        const route = JSON.parse(output);
+        if (route.provider === providerName && route.model === model) {
+            logger.info(`Verified inference route: ${providerName} -> ${model}`);
+            return true;
+        }
+        logger.error(`Inference route verification mismatch. Expected ${providerName} -> ${model}, got ${route.provider ?? "unknown"} -> ${route.model ?? "unknown"}.`);
+        return false;
+    }
+    catch (err) {
+        logger.error(`Failed to verify inference route: ${err instanceof Error ? err.message : String(err)}`);
+        return false;
+    }
 }
 async function cliOnboard(opts) {
     const { logger } = opts;
@@ -219,11 +253,16 @@ async function cliOnboard(opts) {
     }
     else {
         const ollama = detectOllama();
+        const nim = detectLocalNim();
+        if (nim.available) {
+            logger.info(`Detected local inference option: NIM (${nim.gpuSummary}).`);
+            logger.info("Select it explicitly if you want NemoClaw to run a local NIM container.");
+        }
         if (ollama.running) {
             logger.info("Detected local inference option: Ollama.");
             logger.info("Select it explicitly if you want to use it.");
         }
-        endpointType = await promptEndpoint(ollama);
+        endpointType = await promptEndpoint(ollama, nim);
     }
     // Step 2: Endpoint URL resolution
     let endpointUrl;
@@ -239,15 +278,13 @@ async function cliOnboard(opts) {
                     (await (0, prompt_js_1.promptInput)("NCP endpoint URL (e.g., https://partner.api.nvidia.com/v1)"));
             break;
         case "nim-local":
-            endpointUrl =
-                opts.endpointUrl ??
-                    (await (0, prompt_js_1.promptInput)("NIM endpoint URL", "http://nim-service.local:8000/v1"));
+            endpointUrl = opts.endpointUrl ?? (0, local_inference_js_1.getLocalProviderBaseUrl)("nim-local");
             break;
         case "vllm":
-            endpointUrl = `${HOST_GATEWAY_URL}:8000/v1`;
+            endpointUrl = (0, local_inference_js_1.getLocalProviderBaseUrl)("vllm-local");
             break;
         case "ollama":
-            endpointUrl = opts.endpointUrl ?? `${HOST_GATEWAY_URL}:11434/v1`;
+            endpointUrl = opts.endpointUrl ?? (0, local_inference_js_1.getLocalProviderBaseUrl)("ollama-local");
             break;
         case "custom":
             endpointUrl = opts.endpointUrl ?? (await (0, prompt_js_1.promptInput)("Custom endpoint URL"));
@@ -312,8 +349,13 @@ async function cliOnboard(opts) {
     }
     else {
         const discoveredModelOptions = endpointType === "ollama"
-            ? getOllamaModelOptions().map((id) => ({ label: id, value: id }))
-            : validation.models.map((id) => ({ label: id, value: id }));
+            ? (0, local_inference_js_1.getOllamaModelOptions)(runCapture).map((id) => ({ label: id, value: id }))
+            : endpointType === "nim-local"
+                ? getCompatibleNimModels().map((nimModel) => ({
+                    label: `${nimModel.name} (min ${String(Math.floor(nimModel.minGpuMemoryMB / 1024))} GB VRAM)`,
+                    value: nimModel.name,
+                }))
+                : validation.models.map((id) => ({ label: id, value: id }));
         const curatedCloudOptions = endpointType === "build" || endpointType === "ncp"
             ? DEFAULT_MODELS.filter((option) => validation.models.includes(option.id)).map((option) => ({
                 label: `${option.label} (${option.id})`,
@@ -321,8 +363,10 @@ async function cliOnboard(opts) {
             }))
             : [];
         const defaultIndex = endpointType === "ollama"
-            ? Math.max(0, discoveredModelOptions.findIndex((option) => option.value === getDefaultOllamaModel()))
-            : 0;
+            ? Math.max(0, discoveredModelOptions.findIndex((option) => option.value === (0, local_inference_js_1.getDefaultOllamaModel)(runCapture)))
+            : endpointType === "nim-local"
+                ? Math.max(0, discoveredModelOptions.findIndex((option) => option.value === "nvidia/nemotron-3-nano-30b-a3b"))
+                : 0;
         const modelOptions = curatedCloudOptions.length > 0
             ? curatedCloudOptions
             : discoveredModelOptions.length > 0
@@ -369,6 +413,40 @@ async function cliOnboard(opts) {
     // Step 8: Apply
     logger.info("");
     logger.info("Applying configuration...");
+    if (endpointType === "nim-local") {
+        const runtime = (0, nim_js_1.createNimRuntime)();
+        const gpu = (0, nim_js_1.detectGpu)(runtime);
+        if (!gpu || !gpu.nimCapable) {
+            logger.error("Local NIM requires an NVIDIA GPU and a running Docker daemon.");
+            return;
+        }
+        const supportedModels = (0, nim_js_1.listModels)().filter((nimModel) => nimModel.minGpuMemoryMB <= gpu.totalMemoryMB);
+        if (!supportedModels.some((nimModel) => nimModel.name === model)) {
+            logger.error(`Selected model '${model}' does not fit the detected GPU (${String(Math.floor(gpu.totalMemoryMB / 1024))} GB VRAM).`);
+            return;
+        }
+        logger.info(`Pulling local NIM image for ${model}...`);
+        let resolvedImage;
+        try {
+            resolvedImage = (0, nim_js_1.pullNimImage)(model, runtime);
+            logger.info("Starting local NIM container...");
+            (0, nim_js_1.startNimContainer)(opts.pluginConfig.sandboxName, model, runtime, 8000, resolvedImage);
+        }
+        catch (err) {
+            logger.error(`Failed to launch local NIM container: ${err instanceof Error ? err.message : String(err)}`);
+            return;
+        }
+        logger.info("Waiting for local NIM health check...");
+        if (!(0, nim_js_1.waitForNimHealth)(runtime)) {
+            logger.error("Local NIM did not become healthy on http://localhost:8000/v1.");
+            return;
+        }
+        const providerValidation = (0, local_inference_js_1.validateLocalProvider)("nim-local", runCapture);
+        if (!providerValidation.ok) {
+            logger.error(providerValidation.message ?? "Local NIM is unavailable.");
+            return;
+        }
+    }
     // 7a: Create/update provider
     try {
         execOpenShell([
@@ -421,6 +499,9 @@ async function cliOnboard(opts) {
     catch (err) {
         const stderr = err instanceof Error && "stderr" in err ? String(err.stderr) : "";
         logger.error(`Failed to set inference route: ${stderr || String(err)}`);
+        return;
+    }
+    if (!verifyInferenceRoute(providerName, model, logger)) {
         return;
     }
     // 7c: Save config
