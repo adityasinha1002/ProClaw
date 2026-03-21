@@ -20,8 +20,26 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 # Create sandbox user (matches OpenShell convention)
 RUN groupadd -r sandbox && useradd -r -g sandbox -d /sandbox -s /bin/bash sandbox \
-    && mkdir -p /sandbox/.openclaw /sandbox/.nemoclaw \
+    && mkdir -p /sandbox/.nemoclaw \
     && chown -R sandbox:sandbox /sandbox
+
+# Split .openclaw into immutable config dir + writable state dir.
+# The policy makes /sandbox/.openclaw read-only via Landlock, so the agent
+# cannot modify openclaw.json, auth tokens, or CORS settings.  Writable
+# state (agents, plugins, etc.) lives in .openclaw-data, reached via symlinks.
+# Ref: https://github.com/NVIDIA/NemoClaw/issues/514
+RUN mkdir -p /sandbox/.openclaw-data/agents/main/agent \
+        /sandbox/.openclaw-data/extensions \
+        /sandbox/.openclaw-data/workspace \
+        /sandbox/.openclaw-data/skills \
+        /sandbox/.openclaw-data/hooks \
+    && mkdir -p /sandbox/.openclaw \
+    && ln -s /sandbox/.openclaw-data/agents /sandbox/.openclaw/agents \
+    && ln -s /sandbox/.openclaw-data/extensions /sandbox/.openclaw/extensions \
+    && ln -s /sandbox/.openclaw-data/workspace /sandbox/.openclaw/workspace \
+    && ln -s /sandbox/.openclaw-data/skills /sandbox/.openclaw/skills \
+    && ln -s /sandbox/.openclaw-data/hooks /sandbox/.openclaw/hooks \
+    && chown -R sandbox:sandbox /sandbox/.openclaw /sandbox/.openclaw-data
 
 # Install OpenClaw CLI
 RUN npm install -g openclaw@2026.3.11
@@ -50,15 +68,11 @@ RUN chmod +x /usr/local/bin/nemoclaw-start
 WORKDIR /sandbox
 USER sandbox
 
-# Pre-create OpenClaw directories
-RUN mkdir -p /sandbox/.openclaw/agents/main/agent \
-    && chmod 700 /sandbox/.openclaw
-
-# Write openclaw.json: set nvidia as default provider, route through
-# inference.local (OpenShell gateway proxy). No API key needed here —
-# openshell injects credentials via the provider configuration.
+# Write the COMPLETE openclaw.json including gateway config and auth token.
+# This file is immutable at runtime (Landlock read-only on /sandbox/.openclaw).
+# No runtime writes to openclaw.json are needed or possible.
 RUN python3 -c "\
-import json, os; \
+import json, os, secrets; \
 config = { \
     'agents': {'defaults': {'model': {'primary': 'nvidia/nemotron-3-super-120b-a12b'}}}, \
     'models': {'mode': 'merge', 'providers': {'nvidia': { \
@@ -66,7 +80,17 @@ config = { \
         'apiKey': 'openshell-managed', \
         'api': 'openai-completions', \
         'models': [{'id': 'nemotron-3-super-120b-a12b', 'name': 'NVIDIA Nemotron 3 Super 120B', 'reasoning': False, 'input': ['text'], 'cost': {'input': 0, 'output': 0, 'cacheRead': 0, 'cacheWrite': 0}, 'contextWindow': 131072, 'maxTokens': 4096}] \
-    }}} \
+    }}}, \
+    'gateway': { \
+        'mode': 'local', \
+        'controlUi': { \
+            'allowInsecureAuth': True, \
+            'dangerouslyDisableDeviceAuth': True, \
+            'allowedOrigins': ['http://127.0.0.1:18789'], \
+        }, \
+        'trustedProxies': ['127.0.0.1', '::1'], \
+        'auth': {'token': secrets.token_hex(32)} \
+    } \
 }; \
 path = os.path.expanduser('~/.openclaw/openclaw.json'); \
 json.dump(config, open(path, 'w'), indent=2); \
