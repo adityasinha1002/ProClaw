@@ -51,6 +51,39 @@ function getProviderSelectionConfig(provider, model) {
         provider,
         providerLabel: "Local Ollama",
       };
+    case "ollama-k3s":
+      return {
+        endpointType: "custom",
+        endpointUrl: INFERENCE_ROUTE_URL,
+        ncpPartner: null,
+        model: model || DEFAULT_OLLAMA_MODEL,
+        profile: DEFAULT_ROUTE_PROFILE,
+        credentialEnv: DEFAULT_ROUTE_CREDENTIAL_ENV,
+        provider,
+        providerLabel: "Ollama (container sidecar)",
+      };
+    case "lmstudio-k3s":
+      return {
+        endpointType: "custom",
+        endpointUrl: INFERENCE_ROUTE_URL,
+        ncpPartner: null,
+        model: model || DEFAULT_OLLAMA_MODEL,
+        profile: DEFAULT_ROUTE_PROFILE,
+        credentialEnv: DEFAULT_ROUTE_CREDENTIAL_ENV,
+        provider,
+        providerLabel: "LM Studio (container sidecar)",
+      };
+    case "lmstudio-local":
+      return {
+        endpointType: "custom",
+        endpointUrl: INFERENCE_ROUTE_URL,
+        ncpPartner: null,
+        model: model || "lmstudio-local",
+        profile: DEFAULT_ROUTE_PROFILE,
+        credentialEnv: DEFAULT_ROUTE_CREDENTIAL_ENV,
+        provider,
+        providerLabel: "Local LM Studio",
+      };
     default:
       return null;
   }
@@ -58,7 +91,7 @@ function getProviderSelectionConfig(provider, model) {
 
 function getOpenClawPrimaryModel(provider, model) {
   const resolvedModel =
-    model || (provider === "ollama-local" ? DEFAULT_OLLAMA_MODEL : DEFAULT_CLOUD_MODEL);
+    model || (provider === "ollama-local" || provider === "ollama-k3s" || provider === "lmstudio-k3s" || provider === "lmstudio-local" ? DEFAULT_OLLAMA_MODEL : DEFAULT_CLOUD_MODEL);
   return resolvedModel ? `${MANAGED_PROVIDER_ID}/${resolvedModel}` : null;
 }
 

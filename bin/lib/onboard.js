@@ -6,28 +6,33 @@
 // NEMOCLAW_NON_INTERACTIVE=1 env var for CI/CD pipelines.
 
 const fs = require("fs");
-const os = require("os");
 const path = require("path");
 const { spawn, spawnSync } = require("child_process");
-const { ROOT, SCRIPTS, run, runCapture, shellQuote } = require("./runner");
+const { ROOT, SCRIPTS, run, runCapture, runInteractive, shellQuote } = require("./runner");
 const {
   getDefaultOllamaModel,
   getLocalProviderBaseUrl,
   getOllamaModelOptions,
   getOllamaWarmupCommand,
+  isOllamaBoundToAllInterfaces,
   validateOllamaModel,
   validateLocalProvider,
 } = require("./local-inference");
 const {
   CLOUD_MODEL_OPTIONS,
   DEFAULT_CLOUD_MODEL,
+  DEFAULT_OLLAMA_MODEL,
+  getOpenClawPrimaryModel,
   getProviderSelectionConfig,
 } = require("./inference-config");
 const {
   inferContainerRuntime,
   isUnsupportedMacosRuntime,
+  isWsl,
   shouldPatchCoredns,
 } = require("./platform");
+const ollamaContainer = require("./ollama-container");
+const { getSidecar, isSidecarProvider, awaitModelDownload } = require("./sidecar");
 const { prompt, ensureApiKey, getCredential } = require("./credentials");
 const registry = require("./registry");
 const nim = require("./nim");
@@ -176,25 +181,31 @@ function getStableGatewayImageRef(versionOutput = null) {
   return `ghcr.io/nvidia/openshell/cluster:${version}`;
 }
 
+function pythonLiteralJson(value) {
+  return JSON.stringify(JSON.stringify(value));
+}
+
 function buildSandboxConfigSyncScript(selectionConfig) {
-  // openclaw.json is immutable (root:root 444, Landlock read-only) — never
-  // write to it at runtime.  Model routing is handled by the host-side
-  // gateway (`openshell inference set` in Step 5), not from inside the
-  // sandbox.  We only write the NemoClaw selection config (~/.nemoclaw/).
+  const providerType = selectionConfig.provider || (
+    selectionConfig.profile === "inference-local"
+      ? selectionConfig.endpointType === "vllm"
+        ? "vllm-local"
+        : "nvidia-nim"
+      : "nvidia-nim"
+  );
+  const primaryModel = getOpenClawPrimaryModel(providerType, selectionConfig.model);
+  // openclaw.json is locked (root:444) at runtime — the model config is baked
+  // into the Dockerfile via NEMOCLAW_MODEL build arg. We only write our own
+  // nemoclaw config here.
   return `
 set -euo pipefail
 mkdir -p ~/.nemoclaw
 cat > ~/.nemoclaw/config.json <<'EOF_NEMOCLAW_CFG'
 ${JSON.stringify(selectionConfig, null, 2)}
 EOF_NEMOCLAW_CFG
+openclaw models set ${shellQuote(primaryModel)} > /dev/null 2>&1 || true
 exit
 `.trim();
-}
-
-function writeSandboxConfigSyncFile(script, tmpDir = os.tmpdir(), now = Date.now()) {
-  const scriptFile = path.join(tmpDir, `nemoclaw-sync-${now}.sh`);
-  fs.writeFileSync(scriptFile, `${script}\n`, { mode: 0o600 });
-  return scriptFile;
 }
 
 async function promptCloudModel() {
@@ -210,6 +221,8 @@ async function promptCloudModel() {
   return (CLOUD_MODEL_OPTIONS[index] || CLOUD_MODEL_OPTIONS[0]).id;
 }
 
+// macOS host-side Ollama model picker — queries host `ollama list`.
+// Matches main branch's version (no VRAM tiers).
 async function promptOllamaModel() {
   const options = getOllamaModelOptions(runCapture);
   const defaultModel = getDefaultOllamaModel(runCapture);
@@ -225,6 +238,55 @@ async function promptOllamaModel() {
   const choice = await prompt(`  Choose model [${defaultIndex + 1}]: `);
   const index = parseInt(choice || String(defaultIndex + 1), 10) - 1;
   return options[index] || options[defaultIndex] || defaultModel;
+}
+
+// Sidecar model picker — queries the running container for installed models.
+// Sidecar model picker — shows installed models from container, then starter
+// models for download. No external API calls — uses container runtime + curated list.
+async function promptSidecarModel(providerKey) {
+  const sidecar = getSidecar(providerKey);
+  const installed = sidecar.listModels("default");
+  const starters = sidecar.starterModels || [];
+
+  // Build merged list: installed first, then starters not yet installed
+  const options = [];
+  const seen = new Set();
+
+  for (const m of installed) {
+    options.push({ model: m, label: `${m} (installed)` });
+    seen.add(m);
+    // Also mark the API model ID as seen (handles LM Studio @quant variants)
+    seen.add(sidecar.getApiModelId(m));
+  }
+
+  for (const s of starters) {
+    const apiId = sidecar.getApiModelId(s.model);
+    if (!seen.has(s.model) && !seen.has(apiId)) {
+      options.push({ model: s.model, label: `${s.label} [will download]` });
+      seen.add(s.model);
+    }
+  }
+
+  if (options.length === 0) {
+    console.error("  No models available and no starter models configured.");
+    process.exit(1);
+  }
+
+  console.log("");
+  if (installed.length > 0) {
+    console.log(`  ${sidecar.label} models:`);
+  } else {
+    console.log(`  No models in ${sidecar.label} container yet.`);
+    console.log("  NVIDIA Nemotron models:");
+  }
+  options.forEach((o, i) => {
+    console.log(`    ${i + 1}) ${o.label}`);
+  });
+  console.log("");
+
+  const choice = await prompt(`  Choose model [1]: `);
+  const index = parseInt(choice || "1", 10) - 1;
+  return (options[index] || options[0]).model;
 }
 
 function isDockerRunning() {
@@ -292,17 +354,18 @@ function parsePolicyPresetEnv(value) {
 }
 
 function isSafeModelId(value) {
-  return /^[A-Za-z0-9._:/-]+$/.test(value);
+  // Allow @ for LM Studio's model@quantization format (e.g., "qwen3-0.6b@q4_k_m")
+  return /^[A-Za-z0-9._:/@-]+$/.test(value);
 }
 
 function getNonInteractiveProvider() {
   const providerKey = (process.env.NEMOCLAW_PROVIDER || "").trim().toLowerCase();
   if (!providerKey) return null;
 
-  const validProviders = new Set(["cloud", "ollama", "vllm", "nim"]);
+  const validProviders = new Set(["cloud", "ollama", "lmstudio", "vllm", "nim"]);
   if (!validProviders.has(providerKey)) {
     console.error(`  Unsupported NEMOCLAW_PROVIDER: ${providerKey}`);
-    console.error("  Valid values: cloud, ollama, vllm, nim");
+    console.error("  Valid values: cloud, ollama, lmstudio, vllm, nim");
     process.exit(1);
   }
 
@@ -314,7 +377,7 @@ function getNonInteractiveModel(providerKey) {
   if (!model) return null;
   if (!isSafeModelId(model)) {
     console.error(`  Invalid NEMOCLAW_MODEL for provider '${providerKey}': ${model}`);
-    console.error("  Model values may only contain letters, numbers, '.', '_', ':', '/', and '-'.");
+    console.error("  Model values may only contain letters, numbers, '.', '_', ':', '/', '@', and '-'.");
     process.exit(1);
   }
   return model;
@@ -325,10 +388,24 @@ function getNonInteractiveModel(providerKey) {
 async function preflight() {
   step(1, 7, "Preflight checks");
 
-  // Docker
+  // Docker — on WSL2, the socket may take a few seconds to reconnect after a Docker Desktop restart
+  const wsl = isWsl();
   if (!isDockerRunning()) {
-    console.error("  Docker is not running. Please start Docker and try again.");
-    process.exit(1);
+    if (wsl) {
+      let recovered = false;
+      for (let i = 0; i < 3; i++) {
+        console.log("  Docker not responding — WSL2 socket may be reconnecting. Retrying...");
+        sleep(3);
+        if (isDockerRunning()) { recovered = true; break; }
+      }
+      if (!recovered) {
+        console.error("  Docker is not running. Start Docker Desktop on Windows and try again.");
+        process.exit(1);
+      }
+    } else {
+      console.error("  Docker is not running. Please start Docker and try again.");
+      process.exit(1);
+    }
   }
   console.log("  ✓ Docker is running");
 
@@ -354,16 +431,23 @@ async function preflight() {
   }
   console.log(`  ✓ openshell CLI: ${runCapture("openshell --version 2>/dev/null || echo unknown", { ignoreError: true })}`);
 
-  // Clean up stale NemoClaw session before checking ports.
-  // A previous onboard run may have left the gateway container and port
-  // forward running.  If a NemoClaw-owned gateway is still present, tear
-  // it down so the port check below doesn't fail on our own leftovers.
+  // Check for stale NemoClaw session before checking ports.
   const gwInfo = runCapture("openshell gateway info -g nemoclaw 2>/dev/null", { ignoreError: true });
   if (hasStaleGateway(gwInfo)) {
-    console.log("  Cleaning up previous NemoClaw session...");
-    run("openshell forward stop 18789 2>/dev/null || true", { ignoreError: true });
-    run("openshell gateway destroy -g nemoclaw 2>/dev/null || true", { ignoreError: true });
-    console.log("  ✓ Previous session cleaned up");
+    let doClean = true;
+    if (isNonInteractive()) {
+      doClean = true;
+    } else {
+      console.log("  Found a previous NemoClaw session.");
+      const answer = await prompt("  Clean up and start fresh? [Y/n]: ");
+      doClean = answer.toLowerCase() !== "n";
+    }
+    if (doClean) {
+      console.log("  Cleaning up previous session...");
+      run("openshell forward stop 18789 2>/dev/null || true", { ignoreError: true });
+      run("openshell gateway destroy -g nemoclaw 2>/dev/null || true", { ignoreError: true });
+      console.log("  ✓ Previous session cleaned up");
+    }
   }
 
   // Required ports — gateway (8080) and dashboard (18789)
@@ -401,10 +485,14 @@ async function preflight() {
     console.log(`  ✓ Port ${port} available (${label})`);
   }
 
-  // GPU
+  // GPU + WSL2
   const gpu = nim.detectGpu();
   if (gpu && gpu.type === "nvidia") {
-    console.log(`  ✓ NVIDIA GPU detected: ${gpu.count} GPU(s), ${gpu.totalMemoryMB} MB VRAM`);
+    const vramGB = Math.round(gpu.totalMemoryMB / 1024);
+    console.log(`  ✓ NVIDIA GPU detected: ${gpu.count} GPU(s), ${vramGB} GB VRAM`);
+    if (wsl) {
+      console.log("  ✓ WSL2 detected — local GPU inference available");
+    }
   } else if (gpu && gpu.type === "apple") {
     console.log(`  ✓ Apple GPU detected: ${gpu.name}${gpu.cores ? ` (${gpu.cores} cores)` : ""}, ${gpu.totalMemoryMB} MB unified memory`);
     console.log("  ⓘ NIM requires NVIDIA GPU — will use cloud inference");
@@ -471,8 +559,8 @@ async function startGateway(gpu) {
 
 // ── Step 3: Sandbox ──────────────────────────────────────────────
 
-async function createSandbox(gpu) {
-  step(3, 7, "Creating sandbox");
+async function createSandbox(gpu, model) {
+  step(4, 7, "Creating sandbox");
 
   const nameAnswer = await promptOrDefault(
     "  Sandbox name (lowercase, numbers, hyphens) [my-assistant]: ",
@@ -515,7 +603,14 @@ async function createSandbox(gpu) {
   const { mkdtempSync } = require("fs");
   const os = require("os");
   const buildCtx = fs.mkdtempSync(path.join(os.tmpdir(), "nemoclaw-build-"));
-  fs.copyFileSync(path.join(ROOT, "Dockerfile"), path.join(buildCtx, "Dockerfile"));
+  let dockerfile = fs.readFileSync(path.join(ROOT, "Dockerfile"), "utf-8");
+  if (model) {
+    dockerfile = dockerfile.replace(
+      /^ARG NEMOCLAW_MODEL=.+$/m,
+      `ARG NEMOCLAW_MODEL=${model}`,
+    );
+  }
+  fs.writeFileSync(path.join(buildCtx, "Dockerfile"), dockerfile);
   run(`cp -r "${path.join(ROOT, "nemoclaw")}" "${buildCtx}/nemoclaw"`);
   run(`cp -r "${path.join(ROOT, "nemoclaw-blueprint")}" "${buildCtx}/nemoclaw-blueprint"`);
   run(`cp -r "${path.join(ROOT, "scripts")}" "${buildCtx}/scripts"`);
@@ -619,37 +714,81 @@ async function createSandbox(gpu) {
 
 // ── Step 4: NIM ──────────────────────────────────────────────────
 
-async function setupNim(sandboxName, gpu) {
-  step(4, 7, "Configuring inference (NIM)");
+async function selectInferenceProvider(sandboxName, gpu) {
+  step(3, 7, "Selecting inference provider");
 
   let model = null;
   let provider = "nvidia-nim";
   let nimContainer = null;
+  let pullProc = null;
 
   // Detect local inference options
-  const hasOllama = !!runCapture("command -v ollama", { ignoreError: true });
+  const useSidecar = process.platform === "linux"; // Linux: Docker sidecar avoids host-networking issues
+  const hasOllama = !useSidecar && !!runCapture("command -v ollama", { ignoreError: true });
   const ollamaRunning = !!runCapture("curl -sf http://localhost:11434/api/tags 2>/dev/null", { ignoreError: true });
+  const lmstudioRunning = !!runCapture("curl -sf http://localhost:1234/v1/models 2>/dev/null", { ignoreError: true });
   const vllmRunning = !!runCapture("curl -sf http://localhost:8000/v1/models 2>/dev/null", { ignoreError: true });
   const requestedProvider = isNonInteractive() ? getNonInteractiveProvider() : null;
   const requestedModel = isNonInteractive() ? getNonInteractiveModel(requestedProvider || "cloud") : null;
-  // Build options list — only show local options with NEMOCLAW_EXPERIMENTAL=1
+
+  // When an RTX GPU with 8+ GB VRAM is detected, prefer local inference over cloud.
+  const anyLocalRunning = ollamaRunning || lmstudioRunning;
+  // Default to local inference when GPU has enough VRAM to run a good model.
+  // Threshold: 80% of the 12GB tier (gemma3:12b at 11000 MB) = ~9600 MB.
+  // Configurable via NEMOCLAW_LOCAL_VRAM_THRESHOLD_MB.
+  const localVramThreshold = parseInt(process.env.NEMOCLAW_LOCAL_VRAM_THRESHOLD_MB || "9600", 10);
+  const hasRtxGpu = gpu && gpu.type === "nvidia" && gpu.perGpuMB >= localVramThreshold;
+  const preferLocal = EXPERIMENTAL && hasRtxGpu;
+
+  // Build status labels for local providers
+  const ollamaStatus = useSidecar
+    ? "Docker sidecar"
+    : ollamaRunning ? "running" : hasOllama ? "installed" : "will install";
+  const lmstudioStatus = lmstudioRunning ? "running" : "will install";
+
+  // Build options list — always show Ollama and LM Studio when GPU is available
   const options = [];
   if (EXPERIMENTAL && gpu && gpu.nimCapable) {
     options.push({ key: "nim", label: "Local NIM container (NVIDIA GPU) [experimental]" });
   }
-  options.push({
-    key: "cloud",
-    label:
-      "NVIDIA Endpoint API (build.nvidia.com)" +
-      (!ollamaRunning && !(EXPERIMENTAL && vllmRunning) ? " (recommended)" : ""),
-  });
-  if (hasOllama || ollamaRunning) {
+
+  if (preferLocal) {
+    // Local-first: show local providers before cloud
+    if (useSidecar) {
+      options.push({ key: "ollama-sidecar", label: "Ollama (Docker sidecar) — no install needed" });
+      options.push({ key: "lmstudio-sidecar", label: "LM Studio (Docker sidecar) — no install needed" });
+    } else {
+      options.push({
+        key: "ollama",
+        label: `Local Ollama (${ollamaStatus})`,
+      });
+      if (process.platform === "linux") {
+        options.push({ key: "lmstudio", label: `Local LM Studio (${lmstudioStatus})` });
+      }
+    }
+    options.push({ key: "cloud", label: "NVIDIA Endpoint API (build.nvidia.com)" });
+  } else {
+    // Cloud-first when no GPU or small GPU
     options.push({
-      key: "ollama",
+      key: "cloud",
       label:
-        `Local Ollama (localhost:11434)${ollamaRunning ? " — running" : ""}` +
-        (ollamaRunning ? " (suggested)" : ""),
+        "NVIDIA Endpoint API (build.nvidia.com)" +
+        (!anyLocalRunning && !(EXPERIMENTAL && vllmRunning) ? " (suggested)" : ""),
     });
+    if (useSidecar) {
+      options.push({ key: "ollama-sidecar", label: "Ollama (Docker sidecar) — no install needed" });
+      options.push({ key: "lmstudio-sidecar", label: "LM Studio (Docker sidecar) — no install needed" });
+    } else {
+      if (hasOllama || ollamaRunning || process.platform === "linux" || process.platform === "darwin") {
+        options.push({
+          key: "ollama",
+          label: `Local Ollama (${ollamaStatus})` + (ollamaRunning ? " (suggested)" : ""),
+        });
+      }
+      if (lmstudioRunning) {
+        options.push({ key: "lmstudio", label: "Local LM Studio — running (suggested)" });
+      }
+    }
   }
   if (EXPERIMENTAL && vllmRunning) {
     options.push({
@@ -658,16 +797,17 @@ async function setupNim(sandboxName, gpu) {
     });
   }
 
-  // On macOS without Ollama, offer to install it
-  if (!hasOllama && process.platform === "darwin") {
-    options.push({ key: "install-ollama", label: "Install Ollama (macOS)" });
-  }
-
   if (options.length > 1) {
     let selected;
 
     if (isNonInteractive()) {
-      const providerKey = requestedProvider || "cloud";
+      const defaultProvider = preferLocal
+        ? (useSidecar ? "ollama-sidecar" : "ollama")
+        : "cloud";
+      // Map env var names to option keys (e.g., "ollama" → "ollama-sidecar" on Linux)
+      let providerKey = requestedProvider || defaultProvider;
+      if (useSidecar && providerKey === "ollama") providerKey = "ollama-sidecar";
+      if (useSidecar && providerKey === "lmstudio") providerKey = "lmstudio-sidecar";
       selected = options.find((o) => o.key === providerKey);
       if (!selected) {
         console.error(`  Requested provider '${providerKey}' is not available in this environment.`);
@@ -678,9 +818,12 @@ async function setupNim(sandboxName, gpu) {
       const suggestions = [];
       if (vllmRunning) suggestions.push("vLLM");
       if (ollamaRunning) suggestions.push("Ollama");
+      if (lmstudioRunning) suggestions.push("LM Studio");
       if (suggestions.length > 0) {
         console.log(`  Detected local inference option${suggestions.length > 1 ? "s" : ""}: ${suggestions.join(", ")}`);
-        console.log("  Select one explicitly to use it. Press Enter to keep the cloud default.");
+        if (!preferLocal) {
+          console.log("  Select one explicitly to use it. Press Enter to keep the cloud default.");
+        }
         console.log("");
       }
 
@@ -691,7 +834,8 @@ async function setupNim(sandboxName, gpu) {
       });
       console.log("");
 
-      const defaultIdx = options.findIndex((o) => o.key === "cloud") + 1;
+      const defaultKey = preferLocal ? "ollama" : "cloud";
+      const defaultIdx = options.findIndex((o) => o.key === defaultKey) + 1;
       const choice = await prompt(`  Choose [${defaultIdx}]: `);
       const idx = parseInt(choice || String(defaultIdx), 10) - 1;
       selected = options[idx] || options[defaultIdx - 1];
@@ -744,7 +888,52 @@ async function setupNim(sandboxName, gpu) {
           provider = "vllm-local";
         }
       }
+    } else if (selected.key === "ollama-sidecar" || selected.key === "lmstudio-sidecar") {
+      // Docker sidecar — runs inference container sharing the gateway's network namespace.
+      const providerKey = selected.key === "ollama-sidecar" ? "ollama-k3s" : "lmstudio-k3s";
+      const sidecar = getSidecar(providerKey);
+
+      console.log(`  Starting ${sidecar.label} container (sidecar)...`);
+      sidecar.start("default");
+
+      console.log(`  Waiting for ${sidecar.label} to become ready...`);
+      if (!sidecar.waitForHealth("default")) {
+        console.error(`  ${sidecar.label} container did not become healthy.`);
+        console.error(`  Check: docker logs ${sidecar.containerName("default")}`);
+        process.exit(1);
+      }
+      console.log(`  ✓ ${sidecar.label} container running (shared network with gateway)`);
+
+      provider = providerKey;
+      let downloadModel; // full download ID (e.g., "qwen3-0.6b@q4_k_m" for LM Studio)
+      if (isNonInteractive()) {
+        // Non-interactive: use NEMOCLAW_MODEL or first installed model or default
+        const installed = sidecar.listModels("default");
+        const starters = sidecar.starterModels || [];
+        downloadModel = requestedModel || (installed.length > 0 ? installed[0] : starters.length > 0 ? starters[0].model : DEFAULT_OLLAMA_MODEL);
+      } else {
+        downloadModel = await promptSidecarModel(providerKey);
+      }
+      // API model ID strips the @quantization suffix (LM Studio uses it for download only)
+      model = sidecar.getApiModelId(downloadModel);
+
+      // Kick off model download in background (parallel with sandbox creation)
+      if (!sidecar.hasModel("default", downloadModel)) {
+        pullProc = sidecar.downloadModelAsync("default", downloadModel);
+        console.log(`  Model download started in background: ${downloadModel}`);
+      }
     } else if (selected.key === "ollama") {
+      // macOS / native Linux: host-side Ollama install + start
+      if (!hasOllama) {
+        if (process.platform === "darwin") {
+          console.log("  Installing Ollama via Homebrew...");
+          run("brew install ollama", { ignoreError: true });
+        } else {
+          console.log("  Installing Ollama...");
+          runInteractive("curl -fsSL https://ollama.com/install.sh | sh", { ignoreError: false });
+        }
+      }
+      // Start Ollama if not running
       if (!ollamaRunning) {
         console.log("  Starting Ollama...");
         run("OLLAMA_HOST=0.0.0.0:11434 ollama serve > /dev/null 2>&1 &", { ignoreError: true });
@@ -757,18 +946,91 @@ async function setupNim(sandboxName, gpu) {
       } else {
         model = await promptOllamaModel();
       }
-    } else if (selected.key === "install-ollama") {
-      console.log("  Installing Ollama via Homebrew...");
-      run("brew install ollama", { ignoreError: true });
-      console.log("  Starting Ollama...");
-      run("OLLAMA_HOST=0.0.0.0:11434 ollama serve > /dev/null 2>&1 &", { ignoreError: true });
-        sleep(2);
-      console.log("  ✓ Using Ollama on localhost:11434");
-      provider = "ollama-local";
-      if (isNonInteractive()) {
-        model = requestedModel || getDefaultOllamaModel(runCapture);
-      } else {
-        model = await promptOllamaModel();
+      // Ensure the model is available locally — pull if needed
+      const modelList = runCapture("ollama list 2>/dev/null", { ignoreError: true });
+      if (!modelList || !modelList.includes(model)) {
+        console.log(`  Pulling Ollama model: ${model} (this may take a few minutes)...`);
+        runInteractive(`ollama pull ${shellQuote(model)}`, { ignoreError: false });
+      }
+    } else if (selected.key === "lmstudio") {
+      // Install LM Studio if not running
+      if (!lmstudioRunning) {
+        // Install system dependencies if needed (LM Studio requires libatomic + libgomp on Linux)
+        if (process.platform === "linux") {
+          const missingDeps = [];
+          if (!runCapture("ldconfig -p 2>/dev/null | grep libatomic.so.1", { ignoreError: true })) missingDeps.push("libatomic1");
+          if (!runCapture("ldconfig -p 2>/dev/null | grep libgomp.so.1", { ignoreError: true })) missingDeps.push("libgomp1");
+          if (missingDeps.length > 0) {
+            // Check if apt-get is available; if not, ask user to install manually
+            const hasApt = !!runCapture("command -v apt-get", { ignoreError: true });
+            if (hasApt) {
+              if (isNonInteractive()) {
+                console.log(`  Installing dependencies: ${missingDeps.join(", ")}...`);
+                runInteractive(`sudo apt-get update -qq && sudo apt-get install -y ${missingDeps.join(" ")}`, { ignoreError: false });
+              } else {
+                console.log(`  LM Studio requires: ${missingDeps.join(", ")}`);
+                const answer = await prompt("  Install via apt-get? (requires sudo) [Y/n]: ");
+                if (answer.toLowerCase() === "n") {
+                  console.error(`  Cannot proceed without: ${missingDeps.join(", ")}`);
+                  console.error("  Install manually and retry.");
+                  process.exit(1);
+                }
+                runInteractive(`sudo apt-get update -qq && sudo apt-get install -y ${missingDeps.join(" ")}`, { ignoreError: false });
+              }
+            } else {
+              console.error(`  LM Studio requires: ${missingDeps.join(", ")}`);
+              console.error("  Your system does not use apt. Install these packages manually and retry.");
+              process.exit(1);
+            }
+          }
+        }
+        console.log("  Installing LM Studio CLI...");
+        runInteractive("curl -fsSL https://lmstudio.ai/install.sh | sh", { ignoreError: false });
+        // Add to PATH for this session
+        const lmsDir = path.join(process.env.HOME || "", ".lmstudio", "bin");
+        if (!process.env.PATH.split(path.delimiter).includes(lmsDir)) {
+          process.env.PATH = `${lmsDir}${path.delimiter}${process.env.PATH}`;
+        }
+        console.log("  Starting LM Studio server...");
+        run("lms daemon up 2>/dev/null || true", { ignoreError: true });
+        run("lms server start --bind 0.0.0.0 --port 1234 > /dev/null 2>&1 &", { ignoreError: true });
+        sleep(5);
+        // Verify the server is actually responding
+        if (!runCapture("curl -sf http://localhost:1234/v1/models 2>/dev/null", { ignoreError: true })) {
+          console.error("  LM Studio server failed to start.");
+          console.error("  Try running manually: lms daemon up && lms server start --bind 0.0.0.0 --port 1234");
+          process.exit(1);
+        }
+      }
+      console.log("  ✓ Using LM Studio on localhost:1234");
+      provider = "lmstudio-local";
+      // Query loaded models from LM Studio
+      const modelsOutput = runCapture("curl -sf http://localhost:1234/v1/models 2>/dev/null", { ignoreError: true });
+      if (modelsOutput) {
+        try {
+          const parsed = JSON.parse(modelsOutput);
+          const modelIds = (parsed.data || []).map((m) => m.id);
+          if (modelIds.length > 0) {
+            if (isNonInteractive()) {
+              model = requestedModel || modelIds[0];
+            } else if (modelIds.length === 1) {
+              model = modelIds[0];
+              console.log(`  Using loaded model: ${model}`);
+            } else {
+              console.log("");
+              console.log("  LM Studio models:");
+              modelIds.forEach((m, i) => { console.log(`    ${i + 1}) ${m}`); });
+              console.log("");
+              const modelChoice = await prompt("  Choose model [1]: ");
+              const midx = parseInt(modelChoice || "1", 10) - 1;
+              model = modelIds[midx] || modelIds[0];
+            }
+          }
+        } catch {}
+      }
+      if (!model) {
+        console.log("  No models loaded in LM Studio. Load a model in the LM Studio app and retry.");
+        process.exit(1);
       }
     } else if (selected.key === "vllm") {
       console.log("  ✓ Using existing vLLM on localhost:8000");
@@ -794,15 +1056,24 @@ async function setupNim(sandboxName, gpu) {
     console.log(`  Using NVIDIA Endpoint API with model: ${model}`);
   }
 
-  registry.updateSandbox(sandboxName, { model, provider, nimContainer });
+  if (sandboxName) {
+    registry.updateSandbox(sandboxName, { model, provider, nimContainer });
+  }
 
-  return { model, provider };
+  return { model, provider, nimContainer, pullProc };
 }
 
 // ── Step 5: Inference provider ───────────────────────────────────
 
 async function setupInference(sandboxName, model, provider) {
-  step(5, 7, "Setting up inference provider");
+  let providerDesc = provider;
+  if (provider === "nvidia-nim") providerDesc = "NVIDIA Endpoint API";
+  else if (provider === "ollama-local") providerDesc = "Ollama (host)";
+  else if (provider === "ollama-k3s") providerDesc = "Ollama (sidecar)";
+  else if (provider === "lmstudio-k3s") providerDesc = "LM Studio (sidecar)";
+  else if (provider === "vllm-local") providerDesc = "vLLM";
+  else if (provider === "lmstudio-local") providerDesc = "LM Studio";
+  step(5, 7, `Setting up inference — ${providerDesc} / ${model}`);
 
   if (provider === "nvidia-nim") {
     // Create nvidia-nim provider
@@ -860,12 +1131,88 @@ async function setupInference(sandboxName, model, provider) {
       { ignoreError: true }
     );
     console.log(`  Priming Ollama model: ${model}`);
-    run(getOllamaWarmupCommand(model), { ignoreError: true });
     const probe = validateOllamaModel(model, runCapture);
     if (!probe.ok) {
       console.error(`  ${probe.message}`);
       process.exit(1);
     }
+    // Keep the model loaded in VRAM after the probe
+    run(getOllamaWarmupCommand(model), { ignoreError: true });
+  } else if (isSidecarProvider(provider)) {
+    // Docker sidecar — unified handler for ollama-k3s and lmstudio-k3s.
+    const sidecar = getSidecar(provider);
+    const name = sidecar.getProviderName();
+    const cred = sidecar.getCredential();
+    const baseUrl = getLocalProviderBaseUrl(provider);
+    run(
+      `openshell provider create --name ${name} --type openai ` +
+      `--credential "OPENAI_API_KEY=${cred}" ` +
+      `--config "OPENAI_BASE_URL=${baseUrl}" 2>&1 || ` +
+      `openshell provider update ${name} --credential "OPENAI_API_KEY=${cred}" ` +
+      `--config "OPENAI_BASE_URL=${baseUrl}" 2>&1 || true`,
+      { ignoreError: true }
+    );
+    run(
+      `openshell inference set --no-verify --provider ${name} --model ${shellQuote(model)} 2>/dev/null || true`,
+      { ignoreError: true }
+    );
+    // Load model into GPU (noop for Ollama, required for LM Studio)
+    let loadOk = sidecar.loadModel("default", model);
+    if (!loadOk) {
+      console.error(`  Failed to load model '${model}'.`);
+      console.error("  The model may use an unsupported architecture or exceed available VRAM.");
+      if (isNonInteractive()) {
+        console.error("  Try a different NEMOCLAW_MODEL.");
+        process.exit(1);
+      }
+      // Let user pick a different model
+      console.log("  Pick a different model:");
+      const newDownloadModel = await promptSidecarModel(provider);
+      model = sidecar.getApiModelId(newDownloadModel);
+      if (!sidecar.hasModel("default", newDownloadModel)) {
+        console.log(`  Downloading ${newDownloadModel}...`);
+        sidecar.pullModel("default", newDownloadModel);
+      }
+      loadOk = sidecar.loadModel("default", model);
+      if (!loadOk) {
+        console.error("  Model load failed again. Exiting.");
+        process.exit(1);
+      }
+      // Update inference route with new model
+      run(
+        `openshell inference set --no-verify --provider ${name} --model ${shellQuote(model)} 2>/dev/null || true`,
+        { ignoreError: true }
+      );
+    }
+    console.log(`  Priming model: ${model}`);
+    const probe = sidecar.validateModel("default", model);
+    if (!probe.ok) {
+      console.error(`  ${probe.message}`);
+      if (isNonInteractive()) {
+        process.exit(1);
+      }
+      console.error("  The model loaded but inference probe failed. You may need to try a different model.");
+    }
+    sidecar.warmupModel("default", model);
+  } else if (provider === "lmstudio-local") {
+    const validation = validateLocalProvider(provider, runCapture);
+    if (!validation.ok) {
+      console.error(`  ${validation.message}`);
+      process.exit(1);
+    }
+    const baseUrl = getLocalProviderBaseUrl(provider);
+    run(
+      `openshell provider create --name lmstudio-local --type openai ` +
+      `--credential "OPENAI_API_KEY=lm-studio" ` +
+      `--config "OPENAI_BASE_URL=${baseUrl}" 2>&1 || ` +
+      `openshell provider update lmstudio-local --credential "OPENAI_API_KEY=lm-studio" ` +
+      `--config "OPENAI_BASE_URL=${baseUrl}" 2>&1 || true`,
+      { ignoreError: true }
+    );
+    run(
+      `openshell inference set --no-verify --provider lmstudio-local --model ${shellQuote(model)} 2>/dev/null || true`,
+      { ignoreError: true }
+    );
   }
 
   registry.updateSandbox(sandboxName, { model, provider });
@@ -884,14 +1231,9 @@ async function setupOpenclaw(sandboxName, model, provider) {
       onboardedAt: new Date().toISOString(),
     };
     const script = buildSandboxConfigSyncScript(sandboxConfig);
-    const scriptFile = writeSandboxConfigSyncFile(script);
-    try {
-      run(`openshell sandbox connect "${sandboxName}" < ${shellQuote(scriptFile)}`, {
-        stdio: ["ignore", "ignore", "inherit"],
-      });
-    } finally {
-      fs.unlinkSync(scriptFile);
-    }
+    run(`cat <<'EOF_NEMOCLAW_SYNC' | openshell sandbox connect "${sandboxName}"
+${script}
+EOF_NEMOCLAW_SYNC`, { stdio: ["ignore", "ignore", "inherit"] });
   }
 
   console.log("  ✓ OpenClaw gateway launched inside sandbox");
@@ -1018,6 +1360,9 @@ function printDashboard(sandboxName, model, provider) {
   if (provider === "nvidia-nim") providerLabel = "NVIDIA Endpoint API";
   else if (provider === "vllm-local") providerLabel = "Local vLLM";
   else if (provider === "ollama-local") providerLabel = "Local Ollama";
+  else if (provider === "ollama-k3s") providerLabel = "Ollama (container sidecar)";
+  else if (provider === "lmstudio-k3s") providerLabel = "LM Studio (container sidecar)";
+  else if (provider === "lmstudio-local") providerLabel = "Local LM Studio";
 
   console.log("");
   console.log(`  ${"─".repeat(50)}`);
@@ -1036,6 +1381,24 @@ function printDashboard(sandboxName, model, provider) {
 
 // ── Main ─────────────────────────────────────────────────────────
 
+function awaitModelPull(providerKey, model, pullProc) {
+  if (!isSidecarProvider(providerKey) || !pullProc) return;
+  const sidecar = getSidecar(providerKey);
+
+  if (sidecar.hasModel("default", model)) {
+    console.log(`  ✓ Model ${model} ready`);
+    return;
+  }
+
+  console.log(`  Waiting for model download: ${model}...`);
+  const ok = awaitModelDownload(pullProc, sidecar, "default", model);
+  if (!ok) {
+    console.error(`  Model download failed. Check: docker logs ${sidecar.containerName("default")}`);
+    process.exit(1);
+  }
+  console.log(`  ✓ Model ${model} downloaded`);
+}
+
 async function onboard(opts = {}) {
   NON_INTERACTIVE = opts.nonInteractive || process.env.NEMOCLAW_NON_INTERACTIVE === "1";
 
@@ -1046,8 +1409,10 @@ async function onboard(opts = {}) {
 
   const gpu = await preflight();
   await startGateway(gpu);
-  const sandboxName = await createSandbox(gpu);
-  const { model, provider } = await setupNim(sandboxName, gpu);
+  const { model, provider, nimContainer, pullProc } = await selectInferenceProvider(null, gpu);
+  const sandboxName = await createSandbox(gpu, model);
+  registry.updateSandbox(sandboxName, { model, provider, nimContainer });
+  awaitModelPull(provider, model, pullProc);
   await setupInference(sandboxName, model, provider);
   await setupOpenclaw(sandboxName, model, provider);
   await setupPolicies(sandboxName);
@@ -1061,6 +1426,5 @@ module.exports = {
   hasStaleGateway,
   isSandboxReady,
   onboard,
-  setupNim,
-  writeSandboxConfigSyncFile,
+  selectInferenceProvider,
 };

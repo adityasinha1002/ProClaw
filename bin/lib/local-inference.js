@@ -2,17 +2,63 @@
 // SPDX-License-Identifier: Apache-2.0
 
 const { shellQuote } = require("./runner");
+const { isWsl } = require("./platform");
+const { execSync } = require("child_process");
 
 const HOST_GATEWAY_URL = "http://host.openshell.internal";
 const CONTAINER_REACHABILITY_IMAGE = "curlimages/curl:8.10.1";
 const DEFAULT_OLLAMA_MODEL = "nemotron-3-nano:30b";
 
+// ── WSL2 networking ─────────────────────────────────────────────
+// On WSL2, containers use host.docker.internal to reach host services.
+// On non-WSL, containers use host.openshell.internal via host-gateway.
+
+let _wsl2HostIp = null;
+function getWsl2HostIp() {
+  if (_wsl2HostIp !== null) return _wsl2HostIp;
+  if (!isWsl()) {
+    _wsl2HostIp = "";
+    return _wsl2HostIp;
+  }
+  try {
+    _wsl2HostIp = execSync(
+      "ip addr show eth0 2>/dev/null | grep 'inet ' | awk '{print $2}' | cut -d/ -f1",
+      { encoding: "utf-8" }
+    ).trim();
+  } catch {
+    _wsl2HostIp = "";
+  }
+  return _wsl2HostIp;
+}
+
+function getHostUrl() {
+  if (isWsl()) return "http://host.docker.internal";
+  return HOST_GATEWAY_URL;
+}
+
+// ── Provider URL routing ────────────────────────────────────────
+
 function getLocalProviderBaseUrl(provider) {
+  // Docker sidecars share the gateway container's network namespace.
+  // k3s pods (including OpenShell) can't reach 127.0.0.1 of the gateway —
+  // that resolves to the pod's own loopback. Use the gateway container's
+  // Docker network IP instead (the k3s node's InternalIP).
+  if (provider === "ollama-k3s") {
+    const { getGatewayIp } = require("./ollama-container");
+    return `http://${getGatewayIp()}:11434/v1`;
+  }
+  if (provider === "lmstudio-k3s") {
+    const { getGatewayIp } = require("./ollama-container");
+    return `http://${getGatewayIp()}:1234/v1`;
+  }
+  const hostUrl = getHostUrl();
   switch (provider) {
     case "vllm-local":
-      return `${HOST_GATEWAY_URL}:8000/v1`;
+      return `${hostUrl}:8000/v1`;
     case "ollama-local":
-      return `${HOST_GATEWAY_URL}:11434/v1`;
+      return `${hostUrl}:11434/v1`;
+    case "lmstudio-local":
+      return `${hostUrl}:1234/v1`;
     default:
       return null;
   }
@@ -24,23 +70,38 @@ function getLocalProviderHealthCheck(provider) {
       return "curl -sf http://localhost:8000/v1/models 2>/dev/null";
     case "ollama-local":
       return "curl -sf http://localhost:11434/api/tags 2>/dev/null";
+    case "lmstudio-local":
+      return "curl -sf http://localhost:1234/v1/models 2>/dev/null";
     default:
       return null;
   }
 }
 
 function getLocalProviderContainerReachabilityCheck(provider) {
+  const wsl = isWsl();
+  const hostFlag = wsl
+    ? ["--add-host", "host.docker.internal:host-gateway"]
+    : ["--add-host", "host.openshell.internal:host-gateway"];
+  const hostUrl = wsl ? "http://host.docker.internal" : "http://host.openshell.internal";
+  const baseArgs = ["docker", "run", "--rm", ...hostFlag, CONTAINER_REACHABILITY_IMAGE, "-sf"];
   switch (provider) {
     case "vllm-local":
-      return `docker run --rm --add-host host.openshell.internal:host-gateway ${CONTAINER_REACHABILITY_IMAGE} -sf http://host.openshell.internal:8000/v1/models 2>/dev/null`;
+      return [...baseArgs, `${hostUrl}:8000/v1/models`].join(" ") + " 2>/dev/null";
     case "ollama-local":
-      return `docker run --rm --add-host host.openshell.internal:host-gateway ${CONTAINER_REACHABILITY_IMAGE} -sf http://host.openshell.internal:11434/api/tags 2>/dev/null`;
+      return [...baseArgs, `${hostUrl}:11434/api/tags`].join(" ") + " 2>/dev/null";
+    case "lmstudio-local":
+      return [...baseArgs, `${hostUrl}:1234/v1/models`].join(" ") + " 2>/dev/null";
     default:
       return null;
   }
 }
 
 function validateLocalProvider(provider, runCapture) {
+  // Docker sidecars — health verified by their container modules, not host networking.
+  if (provider === "ollama-k3s" || provider === "lmstudio-k3s") {
+    return { ok: true };
+  }
+
   const command = getLocalProviderHealthCheck(provider);
   if (!command) {
     return { ok: true };
@@ -58,6 +119,11 @@ function validateLocalProvider(provider, runCapture) {
         return {
           ok: false,
           message: "Local Ollama was selected, but nothing is responding on http://localhost:11434.",
+        };
+      case "lmstudio-local":
+        return {
+          ok: false,
+          message: "LM Studio was selected, but nothing is responding on http://localhost:1234.",
         };
       default:
         return { ok: false, message: "The selected local inference provider is unavailable." };
@@ -85,12 +151,30 @@ function validateLocalProvider(provider, runCapture) {
       return {
         ok: false,
         message:
-          "Local Ollama is responding on localhost, but containers cannot reach http://host.openshell.internal:11434. Ensure Ollama listens on 0.0.0.0:11434 instead of 127.0.0.1 so sandboxes can reach it.",
+          "Local Ollama is responding on localhost, but containers cannot reach it. Ensure Ollama listens on 0.0.0.0:11434 instead of 127.0.0.1 so sandboxes can reach it.",
+      };
+    case "lmstudio-local":
+      return {
+        ok: false,
+        message:
+          "LM Studio is responding on localhost, but containers cannot reach it. Ensure LM Studio's server is bound to 0.0.0.0:1234.",
       };
     default:
       return { ok: false, message: "The selected local inference provider is unavailable from containers." };
   }
 }
+
+// ── Ollama binding check (WSL2) ─────────────────────────────────
+
+function isOllamaBoundToAllInterfaces(runCapture) {
+  const output = runCapture(
+    "ss -tlnp 2>/dev/null | grep ':11434' | grep -E '\\*:|0\\.0\\.0\\.0:' && echo ok || true",
+    { ignoreError: true }
+  );
+  return output && output.includes("ok");
+}
+
+// ── Ollama model management ─────────────────────────────────────
 
 function parseOllamaList(output) {
   return String(output || "")
@@ -165,13 +249,17 @@ module.exports = {
   DEFAULT_OLLAMA_MODEL,
   HOST_GATEWAY_URL,
   getDefaultOllamaModel,
+  getHostUrl,
   getLocalProviderBaseUrl,
   getLocalProviderContainerReachabilityCheck,
   getLocalProviderHealthCheck,
   getOllamaModelOptions,
   getOllamaProbeCommand,
   getOllamaWarmupCommand,
+  getWsl2HostIp,
+  isOllamaBoundToAllInterfaces,
   parseOllamaList,
+  shellQuote,
   validateOllamaModel,
   validateLocalProvider,
 };

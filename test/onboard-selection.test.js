@@ -40,14 +40,14 @@ runner.runCapture = (command) => {
 };
 registry.updateSandbox = (_name, update) => updates.push(update);
 
-const { setupNim } = require(${onboardPath});
+const { selectInferenceProvider } = require(${onboardPath});
 
 (async () => {
   const originalLog = console.log;
   const lines = [];
   console.log = (...args) => lines.push(args.join(" "));
   try {
-    const result = await setupNim("selection-test", null);
+    const result = await selectInferenceProvider("selection-test", null);
     originalLog(JSON.stringify({ result, promptCalls, messages, updates, lines }));
   } finally {
     console.log = originalLog;

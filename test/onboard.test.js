@@ -2,19 +2,15 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { describe, it, expect } from "vitest";
-import fs from "node:fs";
-import os from "node:os";
-import path from "node:path";
 
 import {
   buildSandboxConfigSyncScript,
   getInstalledOpenshellVersion,
   getStableGatewayImageRef,
-  writeSandboxConfigSyncFile,
 } from "../bin/lib/onboard";
 
 describe("onboard helpers", () => {
-  it("builds a sandbox sync script that only writes nemoclaw config", () => {
+  it("builds a sandbox sync script that writes config and updates the selected model", () => {
     const script = buildSandboxConfigSyncScript({
       endpointType: "custom",
       endpointUrl: "https://inference.local/v1",
@@ -25,16 +21,11 @@ describe("onboard helpers", () => {
       onboardedAt: "2026-03-18T12:00:00.000Z",
     });
 
-    // Writes NemoClaw selection config to writable ~/.nemoclaw/
     expect(script).toMatch(/cat > ~\/\.nemoclaw\/config\.json/);
     expect(script).toMatch(/"model": "nemotron-3-nano:30b"/);
     expect(script).toMatch(/"credentialEnv": "OPENAI_API_KEY"/);
-
-    // Must NOT modify openclaw config from inside the sandbox — model routing
-    // is handled by the host-side gateway (openshell inference set)
-    expect(script).not.toMatch(/openclaw\.json/);
-    expect(script).not.toMatch(/openclaw models set/);
-
+    expect(script).toMatch(/openclaw models set 'inference\/nemotron-3-nano:30b'/);
+    expect(script).toMatch(/inference\/nemotron-3-nano:30b/);
     expect(script).toMatch(/^exit$/m);
   });
 
@@ -47,14 +38,28 @@ describe("onboard helpers", () => {
     expect(getStableGatewayImageRef("bogus")).toBe(null);
   });
 
-  it("writes sandbox sync scripts to a temp file for stdin redirection", () => {
-    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "nemoclaw-onboard-test-"));
-    try {
-      const scriptFile = writeSandboxConfigSyncFile("echo test", tmpDir, 1234);
-      expect(scriptFile).toBe(path.join(tmpDir, "nemoclaw-sync-1234.sh"));
-      expect(fs.readFileSync(scriptFile, "utf8")).toBe("echo test\n");
-    } finally {
-      fs.rmSync(tmpDir, { recursive: true, force: true });
-    }
+  it("routes ollama-local models through the inference provider", () => {
+    const script = buildSandboxConfigSyncScript({
+      endpointType: "custom",
+      endpointUrl: "https://inference.local/v1",
+      model: "nemotron-3-nano:30b",
+      profile: "inference-local",
+      provider: "ollama-local",
+    });
+
+    expect(script).toMatch(/inference\/nemotron-3-nano:30b/);
+  });
+
+  it("generates a valid shell script with set -euo pipefail", () => {
+    const script = buildSandboxConfigSyncScript({
+      endpointType: "custom",
+      endpointUrl: "https://inference.local/v1",
+      model: "test-model",
+      profile: "inference-local",
+    });
+
+    expect(script).toMatch(/^set -euo pipefail$/m);
+    expect(script).toMatch(/^mkdir -p ~\/\.nemoclaw$/m);
+    expect(script).toMatch(/^exit$/m);
   });
 });

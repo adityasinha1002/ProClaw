@@ -110,7 +110,7 @@ NEMOCLAW_STATE_DIR="${HOME}/.nemoclaw"
 OPENSHELL_CONFIG_DIR="${HOME}/.config/openshell"
 NEMOCLAW_CONFIG_DIR="${HOME}/.config/nemoclaw"
 DEFAULT_GATEWAY="nemoclaw"
-PROVIDERS=("nvidia-nim" "vllm-local" "ollama-local" "nvidia-ncp" "nim-local")
+PROVIDERS=("nvidia-nim" "vllm-local" "ollama-local" "ollama-k3s" "lmstudio-k3s" "nvidia-ncp" "nim-local")
 OPEN_SHELL_INSTALL_PATHS=("/usr/local/bin/openshell" "${XDG_BIN_HOME:-$HOME/.local/bin}/openshell")
 OLLAMA_MODELS=("nemotron-3-super:120b" "nemotron-3-nano:30b")
 TMP_ROOT="${TMPDIR:-/tmp}"
@@ -419,6 +419,8 @@ gateway_volume_candidates() {
   local gateway_name="${1:-$DEFAULT_GATEWAY}"
 
   printf 'openshell-cluster-%s\n' "$gateway_name"
+  printf 'nemoclaw-ollama-models\n'
+  printf 'nemoclaw-lmstudio-models\n'
 }
 
 remove_related_docker_volumes() {
