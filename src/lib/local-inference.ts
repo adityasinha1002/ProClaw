@@ -40,9 +40,9 @@ export function getLocalProviderBaseUrl(provider: string): string | null {
 export function getLocalProviderValidationBaseUrl(provider: string): string | null {
   switch (provider) {
     case "vllm-local":
-      return "http://localhost:8000/v1";
+      return "http://127.0.0.1:8000/v1";
     case "ollama-local":
-      return "http://localhost:11434/v1";
+      return "http://127.0.0.1:11434/v1";
     default:
       return null;
   }
@@ -51,9 +51,9 @@ export function getLocalProviderValidationBaseUrl(provider: string): string | nu
 export function getLocalProviderHealthCheck(provider: string): string | null {
   switch (provider) {
     case "vllm-local":
-      return "curl -sf http://localhost:8000/v1/models 2>/dev/null";
+      return "curl -sf http://127.0.0.1:8000/v1/models 2>/dev/null";
     case "ollama-local":
-      return "curl -sf http://localhost:11434/api/tags 2>/dev/null";
+      return "curl -sf http://127.0.0.1:11434/api/tags 2>/dev/null";
     default:
       return null;
   }
@@ -85,13 +85,13 @@ export function validateLocalProvider(
       case "vllm-local":
         return {
           ok: false,
-          message: "Local vLLM was selected, but nothing is responding on http://localhost:8000.",
+          message: "Local vLLM was selected, but nothing is responding on http://127.0.0.1:8000.",
         };
       case "ollama-local":
         return {
           ok: false,
           message:
-            "Local Ollama was selected, but nothing is responding on http://localhost:11434.",
+            "Local Ollama was selected, but nothing is responding on http://127.0.0.1:11434.",
         };
       default:
         return { ok: false, message: "The selected local inference provider is unavailable." };
@@ -113,13 +113,13 @@ export function validateLocalProvider(
       return {
         ok: false,
         message:
-          "Local vLLM is responding on localhost, but containers cannot reach http://host.openshell.internal:8000. Ensure the server is reachable from containers, not only from the host shell.",
+          "Local vLLM is responding on 127.0.0.1, but containers cannot reach http://host.openshell.internal:8000. Ensure the server is reachable from containers, not only from the host shell.",
       };
     case "ollama-local":
       return {
         ok: false,
         message:
-          "Local Ollama is responding on localhost, but containers cannot reach http://host.openshell.internal:11434. Ensure Ollama listens on 0.0.0.0:11434 instead of 127.0.0.1 so sandboxes can reach it.",
+          "Local Ollama is responding on 127.0.0.1, but containers cannot reach http://host.openshell.internal:11434. Ensure Ollama listens on 0.0.0.0:11434 instead of 127.0.0.1 so sandboxes can reach it.",
       };
     default:
       return {
@@ -151,7 +151,7 @@ export function parseOllamaTags(output: unknown): string[] {
 }
 
 export function getOllamaModelOptions(runCapture: RunCaptureFn): string[] {
-  const tagsOutput = runCapture("curl -sf http://localhost:11434/api/tags 2>/dev/null", {
+  const tagsOutput = runCapture("curl -sf http://127.0.0.1:11434/api/tags 2>/dev/null", {
     ignoreError: true,
   });
   const tagsParsed = parseOllamaTags(tagsOutput);
@@ -190,7 +190,7 @@ export function getOllamaWarmupCommand(model: string, keepAlive = "15m"): string
     stream: false,
     keep_alive: keepAlive,
   });
-  return `nohup curl -s http://localhost:11434/api/generate -H 'Content-Type: application/json' -d ${shellQuote(payload)} >/dev/null 2>&1 &`;
+  return `nohup curl -s http://127.0.0.1:11434/api/generate -H 'Content-Type: application/json' -d ${shellQuote(payload)} >/dev/null 2>&1 &`;
 }
 
 export function getOllamaProbeCommand(
@@ -204,7 +204,7 @@ export function getOllamaProbeCommand(
     stream: false,
     keep_alive: keepAlive,
   });
-  return `curl -sS --max-time ${timeoutSeconds} http://localhost:11434/api/generate -H 'Content-Type: application/json' -d ${shellQuote(payload)} 2>/dev/null`;
+  return `curl -sS --max-time ${timeoutSeconds} http://127.0.0.1:11434/api/generate -H 'Content-Type: application/json' -d ${shellQuote(payload)} 2>/dev/null`;
 }
 
 export function validateOllamaModel(

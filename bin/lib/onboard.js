@@ -2675,7 +2675,7 @@ async function createSandbox(
   console.log("  Waiting for NemoClaw dashboard to become ready...");
   for (let i = 0; i < 15; i++) {
     const readyMatch = runCapture(
-      `openshell sandbox exec ${sandboxName} curl -sf http://localhost:18789/ 2>/dev/null || echo "no"`,
+      `openshell sandbox exec ${sandboxName} curl -sf http://127.0.0.1:18789/ 2>/dev/null || echo "no"`,
       { ignoreError: true },
     );
     if (readyMatch && !readyMatch.includes("no")) {
@@ -3141,7 +3141,7 @@ async function setupNim(gpu) {
           run(`${ollamaEnv}ollama serve > /dev/null 2>&1 &`, { ignoreError: true });
           sleep(2);
         }
-        console.log("  ✓ Using Ollama on localhost:11434");
+        console.log("  ✓ Using Ollama on 127.0.0.1:11434");
         provider = "ollama-local";
         credentialEnv = "OPENAI_API_KEY";
         endpointUrl = getLocalProviderBaseUrl(provider);
@@ -3193,7 +3193,7 @@ async function setupNim(gpu) {
         console.log("  Starting Ollama...");
         run("OLLAMA_HOST=0.0.0.0:11434 ollama serve > /dev/null 2>&1 &", { ignoreError: true });
         sleep(2);
-        console.log("  ✓ Using Ollama on localhost:11434");
+        console.log("  ✓ Using Ollama on 127.0.0.1:11434");
         provider = "ollama-local";
         credentialEnv = "OPENAI_API_KEY";
         endpointUrl = getLocalProviderBaseUrl(provider);
@@ -3239,12 +3239,12 @@ async function setupNim(gpu) {
         }
         break;
       } else if (selected.key === "vllm") {
-        console.log("  ✓ Using existing vLLM on localhost:8000");
+        console.log("  ✓ Using existing vLLM on 127.0.0.1:8000");
         provider = "vllm-local";
         credentialEnv = "OPENAI_API_KEY";
         endpointUrl = getLocalProviderBaseUrl(provider);
         // Query vLLM for the actual model ID
-        const vllmModelsRaw = runCapture("curl -sf http://localhost:8000/v1/models 2>/dev/null", {
+        const vllmModelsRaw = runCapture("curl -sf http://127.0.0.1:8000/v1/models 2>/dev/null", {
           ignoreError: true,
         });
         try {
@@ -3262,7 +3262,7 @@ async function setupNim(gpu) {
           }
         } catch {
           console.error(
-            "  Could not query vLLM models endpoint. Is vLLM running on localhost:8000?",
+            "  Could not query vLLM models endpoint. Is vLLM running on 127.0.0.1:8000?",
           );
           process.exit(1);
         }
@@ -4035,7 +4035,7 @@ function printDashboard(sandboxName, model, provider, nimContainer = null) {
 
   console.log("");
   console.log(`  ${"─".repeat(50)}`);
-  // console.log(`  Dashboard    http://localhost:18789/`);
+  // console.log(`  Dashboard    http://127.0.0.1:18789/`);
   console.log(`  Sandbox      ${sandboxName} (Landlock + seccomp + netns)`);
   console.log(`  Model        ${model} (${providerLabel})`);
   console.log(`  NIM          ${nimLabel}`);
