@@ -182,7 +182,10 @@ echo 'Setting up NemoClaw...'
 # Gateway process isolation is not available in this mode.
 if [ "$(id -u)" -ne 0 ]; then
   echo "[gateway] Running as non-root (uid=$(id -u)) — privilege separation disabled"
-  verify_config_integrity || true
+  export HOME=/sandbox
+  if ! verify_config_integrity; then
+    echo "[SECURITY WARNING] Config integrity check failed — proceeding anyway (non-root mode)"
+  fi
   write_auth_profile
 
   if [ ${#NEMOCLAW_CMD[@]} -gt 0 ]; then
