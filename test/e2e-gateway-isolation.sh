@@ -125,9 +125,8 @@ fi
 # ── Test 7: Entrypoint PATH is locked to system dirs ─────────────
 
 info "7. Entrypoint locks PATH to system directories"
-# Run a real command through the entrypoint to test the actual PATH a
-# sandboxed process receives — no eval hacks or grep extraction.
-OUT=$(docker run --rm "$IMAGE" bash -c 'echo "$PATH"' 2>&1)
+# Walk the entrypoint line-by-line, eval each line, stop after the PATH export.
+OUT=$(run_as_root "bash -c 'while IFS= read -r line; do eval \"\$line\" 2>/dev/null; case \"\$line\" in \"export PATH=\"*) break;; esac; done < /usr/local/bin/nemoclaw-start; echo \$PATH'")
 if echo "$OUT" | grep -q "^/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin$"; then
   pass "PATH is locked to system directories"
 else
