@@ -44,11 +44,19 @@ info() { printf '\033[1;34m  [info]\033[0m %s\n' "$1"; }
 SANDBOX_A="e2e-double-a"
 SANDBOX_B="e2e-double-b"
 REGISTRY="$HOME/.nemoclaw/sandboxes.json"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
+REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 FAKE_HOST="127.0.0.1"
 FAKE_PORT="${NEMOCLAW_FAKE_PORT:-18080}"
 FAKE_BASE_URL="http://${FAKE_HOST}:${FAKE_PORT}/v1"
 FAKE_LOG="$(mktemp)"
 FAKE_PID=""
+
+if command -v node >/dev/null 2>&1 && [ -f "$REPO_ROOT/bin/nemoclaw.js" ]; then
+  NEMOCLAW_CMD=(node "$REPO_ROOT/bin/nemoclaw.js")
+else
+  NEMOCLAW_CMD=(nemoclaw)
+fi
 
 # shellcheck disable=SC2329
 cleanup() {
@@ -148,10 +156,14 @@ run_onboard() {
     env_args+=("NEMOCLAW_RECREATE_SANDBOX=1")
   fi
 
-  env "${env_args[@]}" nemoclaw onboard --non-interactive >"$log_file" 2>&1
+  env "${env_args[@]}" "${NEMOCLAW_CMD[@]}" onboard --non-interactive >"$log_file" 2>&1
   RUN_ONBOARD_EXIT=$?
   RUN_ONBOARD_OUTPUT="$(cat "$log_file")"
   rm -f "$log_file"
+}
+
+run_nemoclaw() {
+  "${NEMOCLAW_CMD[@]}" "$@"
 }
 
 # ══════════════════════════════════════════════════════════════════
@@ -159,9 +171,9 @@ run_onboard() {
 # ══════════════════════════════════════════════════════════════════
 section "Phase 0: Pre-cleanup"
 info "Destroying any leftover test sandboxes/gateway from previous runs..."
-if command -v nemoclaw >/dev/null 2>&1; then
-  nemoclaw "$SANDBOX_A" destroy --yes 2>/dev/null || true
-  nemoclaw "$SANDBOX_B" destroy --yes 2>/dev/null || true
+if [ -x "$REPO_ROOT/bin/nemoclaw.js" ] || command -v nemoclaw >/dev/null 2>&1; then
+  run_nemoclaw "$SANDBOX_A" destroy --yes 2>/dev/null || true
+  run_nemoclaw "$SANDBOX_B" destroy --yes 2>/dev/null || true
 fi
 openshell sandbox delete "$SANDBOX_A" 2>/dev/null || true
 openshell sandbox delete "$SANDBOX_B" 2>/dev/null || true
@@ -188,8 +200,8 @@ else
   exit 1
 fi
 
-if command -v nemoclaw >/dev/null 2>&1; then
-  pass "nemoclaw CLI installed"
+if [ -x "$REPO_ROOT/bin/nemoclaw.js" ] || command -v nemoclaw >/dev/null 2>&1; then
+  pass "nemoclaw CLI available"
 else
   fail "nemoclaw CLI not found — cannot continue"
   exit 1
@@ -352,7 +364,7 @@ else
 fi
 
 STATUS_LOG="$(mktemp)"
-nemoclaw "$SANDBOX_A" status >"$STATUS_LOG" 2>&1
+run_nemoclaw "$SANDBOX_A" status >"$STATUS_LOG" 2>&1
 status_exit=$?
 status_output="$(cat "$STATUS_LOG")"
 rm -f "$STATUS_LOG"
@@ -385,7 +397,7 @@ openshell forward stop 18789 2>/dev/null || true
 openshell gateway stop -g nemoclaw 2>/dev/null || true
 
 GATEWAY_LOG="$(mktemp)"
-nemoclaw "$SANDBOX_B" status >"$GATEWAY_LOG" 2>&1
+run_nemoclaw "$SANDBOX_B" status >"$GATEWAY_LOG" 2>&1
 gateway_status_exit=$?
 gateway_status_output="$(cat "$GATEWAY_LOG")"
 rm -f "$GATEWAY_LOG"
@@ -411,8 +423,8 @@ fi
 # ══════════════════════════════════════════════════════════════════
 section "Phase 7: Final cleanup"
 
-nemoclaw "$SANDBOX_A" destroy --yes 2>/dev/null || true
-nemoclaw "$SANDBOX_B" destroy --yes 2>/dev/null || true
+run_nemoclaw "$SANDBOX_A" destroy --yes 2>/dev/null || true
+run_nemoclaw "$SANDBOX_B" destroy --yes 2>/dev/null || true
 openshell sandbox delete "$SANDBOX_A" 2>/dev/null || true
 openshell sandbox delete "$SANDBOX_B" 2>/dev/null || true
 openshell forward stop 18789 2>/dev/null || true
