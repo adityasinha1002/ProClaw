@@ -9,6 +9,7 @@ const fs = require("fs");
 const os = require("os");
 const path = require("path");
 const { spawn, spawnSync } = require("child_process");
+const pRetry = require("p-retry");
 const { ROOT, SCRIPTS, run, runCapture, shellQuote } = require("./runner");
 const {
   getDefaultOllamaModel,
@@ -1619,45 +1620,36 @@ async function startGatewayWithOptions(_gpu, { exitOnFailure = true } = {}) {
   // internal health-check window allows. Retrying after a clean destroy lets
   // the second attempt benefit from cached images and cleaner cgroup state.
   // See: https://github.com/NVIDIA/OpenShell/issues/433
-  const MAX_GATEWAY_ATTEMPTS = exitOnFailure ? 3 : 1;
-  const GATEWAY_RETRY_DELAYS = [10, 30]; // seconds before 2nd, 3rd attempt
-  let gatewayStarted = false;
+  const retries = exitOnFailure ? 2 : 0;
+  try {
+    await pRetry(() => {
+      const startResult = runOpenshell(["gateway", "start", ...gwArgs], { ignoreError: true, env: gatewayEnv });
 
-  for (let attempt = 0; attempt < MAX_GATEWAY_ATTEMPTS; attempt++) {
-    if (attempt > 0) {
-      const delay = GATEWAY_RETRY_DELAYS[attempt - 1];
-      console.log(`  Retrying gateway start in ${delay}s (attempt ${attempt + 1}/${MAX_GATEWAY_ATTEMPTS})...`);
-      sleep(delay);
-    }
-
-    const startResult = runOpenshell(["gateway", "start", ...gwArgs], { ignoreError: true, env: gatewayEnv });
-
-    if (startResult.status === 0) {
-      // Gateway start command succeeded — verify health
-      let healthy = false;
-      for (let i = 0; i < 5; i++) {
-        const status = runCaptureOpenshell(["status"], { ignoreError: true });
-        const namedInfo = runCaptureOpenshell(["gateway", "info", "-g", GATEWAY_NAME], { ignoreError: true });
-        const currentInfo = runCaptureOpenshell(["gateway", "info"], { ignoreError: true });
-        if (isGatewayHealthy(status, namedInfo, currentInfo)) {
-          healthy = true;
-          break;
+      if (startResult.status === 0) {
+        for (let i = 0; i < 5; i++) {
+          const status = runCaptureOpenshell(["status"], { ignoreError: true });
+          const namedInfo = runCaptureOpenshell(["gateway", "info", "-g", GATEWAY_NAME], { ignoreError: true });
+          const currentInfo = runCaptureOpenshell(["gateway", "info"], { ignoreError: true });
+          if (isGatewayHealthy(status, namedInfo, currentInfo)) {
+            return; // success
+          }
+          if (i < 4) sleep(2);
         }
-        if (i < 4) sleep(2);
       }
-      if (healthy) {
-        gatewayStarted = true;
-        break;
-      }
-    }
 
-    // This attempt failed — clean up before retry or final exit
-    destroyGateway();
-  }
-
-  if (!gatewayStarted) {
+      destroyGateway();
+      throw new Error("Gateway failed to start");
+    }, {
+      retries,
+      minTimeout: 10_000,
+      factor: 3,
+      onFailedAttempt: (err) => {
+        console.log(`  Gateway start attempt ${err.attemptNumber} failed. ${err.retriesLeft} retries left...`);
+      },
+    });
+  } catch {
     if (exitOnFailure) {
-      console.error(`  Gateway failed to start after ${MAX_GATEWAY_ATTEMPTS} attempts.`);
+      console.error(`  Gateway failed to start after ${retries + 1} attempts.`);
       console.error("  Stale state removed. Please rerun: nemoclaw onboard");
       console.error("");
       console.error("  Troubleshooting:");
