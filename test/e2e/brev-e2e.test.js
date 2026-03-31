@@ -83,11 +83,25 @@ function waitForSsh(maxAttempts = 60, intervalMs = 5_000) {
     try {
       ssh("echo ok", { timeout: 10_000 });
       return;
-    } catch {
-      if (i === maxAttempts) throw new Error(`SSH not ready after ${maxAttempts} attempts`);
-      if (i % 5 === 0) {
-        try { brev("refresh"); } catch { /* ignore */ }
+    } catch (err) {
+      if (i % 5 === 0 || i === 1) {
+        console.log(`[ssh attempt ${i}/${maxAttempts}] ${err.message?.split("\n")[0]}`);
+        try {
+          const refreshOut = brev("refresh");
+          console.log(`[brev refresh] ${refreshOut.split("\n")[0]}`);
+        } catch (refreshErr) {
+          console.log(`[brev refresh failed] ${refreshErr.message?.split("\n")[0]}`);
+        }
+        try {
+          const lsOut = brev("ls");
+          console.log(`[brev ls] ${lsOut.split("\n").slice(0, 3).join(" | ")}`);
+        } catch { /* ignore */ }
+        try {
+          const sshConfig = execSync(`grep -A5 "${INSTANCE_NAME}" ~/.ssh/config 2>/dev/null || echo "no ssh config entry"`, { encoding: "utf-8", timeout: 5_000 }).trim();
+          console.log(`[ssh config] ${sshConfig.split("\n").slice(0, 3).join(" | ")}`);
+        } catch { /* ignore */ }
       }
+      if (i === maxAttempts) throw new Error(`SSH not ready after ${maxAttempts} attempts`, { cause: err });
       execSync(`sleep ${intervalMs / 1000}`);
     }
   }
