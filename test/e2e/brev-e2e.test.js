@@ -164,9 +164,36 @@ describe.runIf(hasRequiredVars)("Brev E2E", () => {
     );
     remoteExec(`tar -xzf /tmp/nemoclaw-src.tar.gz -C ${remoteDir}`, { timeout: 60_000 });
 
-    // Bootstrap VM
+    // Bootstrap VM — run via nohup so it survives SSH disconnects (e.g. Docker install)
     console.log("[setup] Running bootstrap...");
-    remoteExecWithSecrets(`cd ${remoteDir} && bash scripts/brev-setup.sh`, { timeout: 900_000 });
+    const secretExports = [
+      `export NVIDIA_API_KEY='${shellEscape(process.env.NVIDIA_API_KEY)}'`,
+      `export GITHUB_TOKEN='${shellEscape(process.env.GITHUB_TOKEN)}'`,
+      `export NEMOCLAW_NON_INTERACTIVE=1`,
+      `export NEMOCLAW_SANDBOX_NAME=e2e-test`,
+    ].join(" && ");
+    remoteExec(
+      `bash -c '${shellEscape(`${secretExports} && cd ${remoteDir} && nohup bash scripts/brev-setup.sh > /tmp/brev-setup.log 2>&1 &`)}'`,
+      { timeout: 30_000 },
+    );
+
+    // Poll for bootstrap completion
+    for (let i = 0; i < 120; i++) {
+      try {
+        const log = remoteExec("tail -5 /tmp/brev-setup.log 2>/dev/null || echo 'no log yet'", { timeout: 15_000 });
+        if (log.includes("Setup complete")) {
+          console.log("[setup] Bootstrap complete");
+          break;
+        }
+        if (log.includes("FAIL") || log.includes("exit 1")) {
+          throw new Error(`Bootstrap failed:\n${log}`);
+        }
+        if (i % 10 === 0) console.log(`[setup] Bootstrap running... (${i * 5}s)`);
+      } catch (err) {
+        if (i % 10 === 0) console.log(`[setup] Waiting for bootstrap... ${err.message?.split("\n")[0]}`);
+      }
+      execSync("sleep 5");
+    }
   }, 1_200_000); // 20 min — instance creation + bootstrap can be slow
 
   afterAll(() => {
