@@ -620,12 +620,11 @@ async function onboard(args) {
   await runOnboard({ nonInteractive, resume });
 }
 
-async function setup() {
+async function setup(args = []) {
   console.log("");
   console.log("  ⚠  `nemoclaw setup` is deprecated. Use `nemoclaw onboard` instead.");
   console.log("");
-  const { onboard: runOnboard } = require("./lib/onboard");
-  await runOnboard({ nonInteractive: false, resume: false });
+  await onboard(args);
 }
 
 async function setupSpark() {
@@ -1184,7 +1183,7 @@ const [cmd, ...args] = process.argv.slice(2);
         await onboard(args);
         break;
       case "setup":
-        await setup();
+        await setup(args);
         break;
       case "setup-spark":
         await setupSpark();
