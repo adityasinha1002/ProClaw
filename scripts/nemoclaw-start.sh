@@ -12,7 +12,9 @@
 # Optional env:
 #   NVIDIA_API_KEY                API key for NVIDIA-hosted inference
 #   CHAT_UI_URL                   Browser origin that will access the forwarded dashboard
-#   NEMOCLAW_DISABLE_DEVICE_AUTH  Set to "1" to skip device-pairing auth (development only)
+#   NEMOCLAW_DISABLE_DEVICE_AUTH  Build-time only. Set to "1" to skip device-pairing auth
+#                                 (development/headless). Has no runtime effect — openclaw.json
+#                                 is baked at image build and verified by hash at startup.
 
 set -euo pipefail
 
@@ -155,6 +157,12 @@ DEADLINE = time.time() + 600
 QUIET_POLLS = 0
 APPROVED = 0
 HANDLED = set()  # Track rejected/approved requestIds to avoid reprocessing
+# SECURITY NOTE: clientId/clientMode are client-supplied and spoofable
+# (the gateway stores connectParams.client.id verbatim). This allowlist
+# is defense-in-depth, not a trust boundary. PR #690 adds one-shot exit,
+# timeout reduction, and token cleanup for a more comprehensive fix.
+ALLOWED_CLIENTS = {'openclaw-control-ui'}
+ALLOWED_MODES = {'webchat'}
 
 def run(*args):
     proc = subprocess.run(args, capture_output=True, text=True)
@@ -177,12 +185,6 @@ while time.time() < DEADLINE:
 
     if pending:
         QUIET_POLLS = 0
-        # SECURITY NOTE: clientId/clientMode are client-supplied and spoofable
-        # (the gateway stores connectParams.client.id verbatim). This allowlist
-        # is defense-in-depth, not a trust boundary. PR #690 adds one-shot exit,
-        # timeout reduction, and token cleanup for a more comprehensive fix.
-        ALLOWED_CLIENTS = {'openclaw-control-ui'}
-        ALLOWED_MODES = {'webchat'}
         for device in pending:
             if not isinstance(device, dict):
                 continue
