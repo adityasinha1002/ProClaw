@@ -209,6 +209,22 @@ function isSandboxReady(output, sandboxName) {
  * @param {string} gwInfoOutput - Raw output from `openshell gateway info -g nemoclaw`.
  * @returns {boolean}
  */
+/**
+ * Remove known_hosts lines whose host field contains an openshell-* entry.
+ * Preserves blank lines and comments. Returns the cleaned string.
+ */
+function pruneKnownHostsEntries(contents) {
+  return contents
+    .split("\n")
+    .filter((l) => {
+      const trimmed = l.trim();
+      if (!trimmed || trimmed.startsWith("#")) return true;
+      const hostField = trimmed.split(/\s+/)[0];
+      return !hostField.split(",").some((h) => h.startsWith("openshell-"));
+    })
+    .join("\n");
+}
+
 function hasStaleGateway(gwInfoOutput) {
   const cleanOutput =
     typeof gwInfoOutput === "string"
@@ -2144,15 +2160,7 @@ async function startGatewayWithOptions(_gpu, { exitOnFailure = true } = {}) {
   if (fs.existsSync(knownHostsPath)) {
     try {
       const kh = fs.readFileSync(knownHostsPath, "utf8");
-      const cleaned = kh
-        .split("\n")
-        .filter((l) => {
-          const trimmed = l.trim();
-          if (!trimmed || trimmed.startsWith("#")) return true;
-          const hostField = trimmed.split(/\s+/)[0];
-          return !hostField.split(",").some((h) => h.startsWith("openshell-"));
-        })
-        .join("\n");
+      const cleaned = pruneKnownHostsEntries(kh);
       if (cleaned !== kh) fs.writeFileSync(knownHostsPath, cleaned);
     } catch {
       /* best-effort cleanup — ignore read/write errors */
@@ -4059,6 +4067,7 @@ module.exports = {
   arePolicyPresetsApplied,
   setupPoliciesWithSelection,
   hydrateCredentialEnv,
+  pruneKnownHostsEntries,
   shouldIncludeBuildContextPath,
   writeSandboxConfigSyncFile,
   patchStagedDockerfile,
