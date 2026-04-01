@@ -214,11 +214,13 @@ describe("platform helpers", () => {
     });
 
     it("skips on WSL", () => {
-      expect(shouldPatchCoredns("docker-desktop", {
-        platform: "linux",
-        env: { WSL_DISTRO_NAME: "Ubuntu" },
-        release: "6.6.87.2-microsoft-standard-WSL2",
-      })).toBe(false);
+      expect(
+        shouldPatchCoredns("docker-desktop", {
+          platform: "linux",
+          env: { WSL_DISTRO_NAME: "Ubuntu" },
+          release: "6.6.87.2-microsoft-standard-WSL2",
+        }),
+      ).toBe(false);
     });
   });
 });
