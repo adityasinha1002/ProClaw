@@ -46,6 +46,22 @@ const nim = require("./nim");
 const onboardSession = require("./onboard-session");
 const policies = require("./policies");
 const { checkPortAvailable, ensureSwap, getMemoryInfo } = require("./preflight");
+function secureTempFile(prefix, ext = "") {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), `${prefix}-`));
+  return path.join(dir, `${prefix}${ext}`);
+}
+
+/**
+ * Safely remove a mkdtemp-created directory.  Guards against accidentally
+ * deleting the system temp root if a caller passes os.tmpdir() itself.
+ */
+function cleanupTempDir(filePath, expectedPrefix) {
+  const parentDir = path.dirname(filePath);
+  if (parentDir !== os.tmpdir() && path.basename(parentDir).startsWith(`${expectedPrefix}-`)) {
+    fs.rmSync(parentDir, { recursive: true, force: true });
+  }
+}
+
 const EXPERIMENTAL = process.env.NEMOCLAW_EXPERIMENTAL === "1";
 const USE_COLOR = !process.env.NO_COLOR && !!process.stdout.isTTY;
 const DIM = USE_COLOR ? "\x1b[2m" : "";
@@ -59,7 +75,6 @@ const BUILD_ENDPOINT_URL = "https://integrate.api.nvidia.com/v1";
 const OPENAI_ENDPOINT_URL = "https://api.openai.com/v1";
 const ANTHROPIC_ENDPOINT_URL = "https://api.anthropic.com";
 const GEMINI_ENDPOINT_URL = "https://generativelanguage.googleapis.com/v1beta/openai/";
-const BEDROCK_ENDPOINT_URL = `https://bedrock-mantle.${process.env.BEDROCK_REGION || process.env.AWS_REGION || ""}.api.aws/v1`;
 
 const REMOTE_PROVIDER_CONFIG = {
   build: {
@@ -125,17 +140,6 @@ const REMOTE_PROVIDER_CONFIG = {
     defaultModel: "",
     skipVerify: true,
   },
-  bedrock: {
-    label: "Amazon Bedrock (OpenAI-compatible endpoint)",
-    providerName: "bedrock",
-    providerType: "openai",
-    credentialEnv: "BEDROCK_API_KEY",
-    endpointUrl: BEDROCK_ENDPOINT_URL,
-    helpUrl: "https://docs.aws.amazon.com/bedrock/latest/userguide/api-keys-generate.html",
-    modelMode: "curated",
-    defaultModel: "nvidia.nemotron-super-3-120b",
-    skipVerify: true,
-  },
 };
 
 const REMOTE_MODEL_OPTIONS = {
@@ -148,15 +152,6 @@ const REMOTE_MODEL_OPTIONS = {
     "gemini-2.5-pro",
     "gemini-2.5-flash",
     "gemini-2.5-flash-lite",
-  ],
-  bedrock: [
-    "nvidia.nemotron-nano-3-30b",
-    "nvidia.nemotron-super-3-120b",
-    "deepseek.v3.2",
-    "openai.gpt-oss-120b",
-    "mistral.devstral-2-123b",
-    "moonshotai.kimi-k2.5",
-    "minimax.minimax-m2.5",
   ],
 };
 
@@ -704,10 +699,7 @@ function getProbeRecovery(probe, options = {}) {
 
 // eslint-disable-next-line complexity
 function runCurlProbe(argv) {
-  const bodyFile = path.join(
-    os.tmpdir(),
-    `nemoclaw-curl-probe-${Date.now()}-${Math.random().toString(36).slice(2)}.json`,
-  );
+  const bodyFile = secureTempFile("nemoclaw-curl-probe", ".json");
   try {
     const args = [...argv];
     const url = args.pop();
@@ -760,7 +752,7 @@ function runCurlProbe(argv) {
       message: summarizeCurlFailure(error?.status || 1, error?.message || String(error)),
     };
   } finally {
-    fs.rmSync(bodyFile, { force: true });
+    cleanupTempDir(bodyFile, "nemoclaw-curl-probe");
   }
 }
 
@@ -1026,7 +1018,6 @@ function getSandboxInferenceConfig(model, provider = null, preferredInferenceApi
         supportsStore: false,
       };
       break;
-    case "bedrock":
     case "compatible-endpoint":
       providerKey = "inference";
       primaryModelRef = `inference/${model}`;
@@ -1955,12 +1946,11 @@ function getNonInteractiveProvider() {
     "custom",
     "nim-local",
     "vllm",
-    "bedrock",
   ]);
   if (!validProviders.has(normalized)) {
     console.error(`  Unsupported NEMOCLAW_PROVIDER: ${providerKey}`);
     console.error(
-      "  Valid values: build, openai, anthropic, anthropicCompatible, gemini, ollama, custom, nim-local, vllm, bedrock",
+      "  Valid values: build, openai, anthropic, anthropicCompatible, gemini, ollama, custom, nim-local, vllm",
     );
     process.exit(1);
   }
@@ -2305,23 +2295,32 @@ async function recoverGatewayRuntime() {
 // ── Step 3: Sandbox ──────────────────────────────────────────────
 
 async function promptValidatedSandboxName() {
-  const nameAnswer = await promptOrDefault(
-    "  Sandbox name (lowercase, numbers, hyphens) [my-assistant]: ",
-    "NEMOCLAW_SANDBOX_NAME",
-    "my-assistant",
-  );
-  const sandboxName = (nameAnswer || "my-assistant").trim().toLowerCase();
+  while (true) {
+    const nameAnswer = await promptOrDefault(
+      "  Sandbox name (lowercase, numbers, hyphens) [my-assistant]: ",
+      "NEMOCLAW_SANDBOX_NAME",
+      "my-assistant",
+    );
+    const sandboxName = (nameAnswer || "my-assistant").trim().toLowerCase();
 
-  // Validate: RFC 1123 subdomain — lowercase alphanumeric and hyphens,
-  // must start and end with alphanumeric (required by Kubernetes/OpenShell)
-  if (!/^[a-z0-9]([a-z0-9-]*[a-z0-9])?$/.test(sandboxName)) {
+    // Validate: RFC 1123 subdomain — lowercase alphanumeric and hyphens,
+    // must start and end with alphanumeric (required by Kubernetes/OpenShell)
+    if (/^[a-z0-9]([a-z0-9-]*[a-z0-9])?$/.test(sandboxName)) {
+      return sandboxName;
+    }
+
     console.error(`  Invalid sandbox name: '${sandboxName}'`);
     console.error("  Names must be lowercase, contain only letters, numbers, and hyphens,");
     console.error("  and must start and end with a letter or number.");
-    process.exit(1);
-  }
 
-  return sandboxName;
+    // Non-interactive runs cannot re-prompt — abort so the caller can fix the
+    // NEMOCLAW_SANDBOX_NAME env var and retry.
+    if (isNonInteractive()) {
+      process.exit(1);
+    }
+
+    console.error("  Please try again.\n");
+  }
 }
 
 // ── Step 5: Sandbox ──────────────────────────────────────────────
@@ -2643,7 +2642,6 @@ async function setupNim(gpu) {
       label: "Local vLLM [experimental] — running",
     });
   }
-  options.push({ key: "bedrock", label: "Amazon Bedrock (OpenAI-compatible endpoint)" });
   // On macOS without Ollama, offer to install it
   if (!hasOllama && process.platform === "darwin") {
     options.push({ key: "install-ollama", label: "Install Ollama (macOS)" });
@@ -2693,18 +2691,6 @@ async function setupNim(gpu) {
         credentialEnv = remoteConfig.credentialEnv;
         endpointUrl = remoteConfig.endpointUrl;
         preferredInferenceApi = null;
-
-        if (selected.key === "bedrock") {
-          const bedrockRegion = process.env.BEDROCK_REGION || process.env.AWS_REGION;
-          if (!bedrockRegion) {
-            console.error("  BEDROCK_REGION or AWS_REGION must be set for Amazon Bedrock.");
-            if (isNonInteractive()) {
-              process.exit(1);
-            }
-            continue selectionLoop;
-          }
-          endpointUrl = `https://bedrock-mantle.${bedrockRegion}.api.aws/v1`;
-        }
 
         if (selected.key === "custom") {
           const endpointInput = isNonInteractive()
@@ -2789,11 +2775,7 @@ async function setupNim(gpu) {
           }
           const defaultModel = requestedModel || remoteConfig.defaultModel;
           let modelValidator = null;
-          if (
-            selected.key === "openai" ||
-            selected.key === "gemini" ||
-            selected.key === "bedrock"
-          ) {
+          if (selected.key === "openai" || selected.key === "gemini") {
             modelValidator = (candidate) =>
               validateOpenAiLikeModel(
                 remoteConfig.label,
@@ -2850,20 +2832,6 @@ async function setupNim(gpu) {
               if (validation.retry === "selection") {
                 continue selectionLoop;
               }
-            } else if (selected.key === "bedrock") {
-              // Bedrock Mantle exposes an OpenAI-compatible API
-              const retryMessage = "Please choose a provider/model again.";
-              preferredInferenceApi = await validateOpenAiLikeSelection(
-                remoteConfig.label,
-                endpointUrl,
-                model,
-                credentialEnv,
-                retryMessage,
-              );
-              if (preferredInferenceApi) {
-                break;
-              }
-              continue selectionLoop;
             } else if (selected.key === "anthropicCompatible") {
               const validation = await validateCustomAnthropicSelection(
                 remoteConfig.label,
@@ -3207,8 +3175,7 @@ async function setupInference(
     provider === "anthropic-prod" ||
     provider === "compatible-anthropic-endpoint" ||
     provider === "gemini-api" ||
-    provider === "compatible-endpoint" ||
-    provider === "bedrock"
+    provider === "compatible-endpoint"
   ) {
     const config =
       provider === "nvidia-nim"
@@ -3351,7 +3318,7 @@ async function setupOpenclaw(sandboxName, model, provider) {
         { stdio: ["ignore", "ignore", "inherit"] },
       );
     } finally {
-      fs.rmSync(path.dirname(scriptFile), { recursive: true, force: true });
+      cleanupTempDir(scriptFile, "nemoclaw-sync");
     }
   }
 
@@ -3750,7 +3717,6 @@ function printDashboard(sandboxName, model, provider, nimContainer = null) {
   else if (provider === "gemini-api") providerLabel = "Google Gemini";
   else if (provider === "compatible-endpoint") providerLabel = "Other OpenAI-compatible endpoint";
   else if (provider === "vllm-local") providerLabel = "Local vLLM";
-  else if (provider === "bedrock") providerLabel = "Amazon Bedrock";
   else if (provider === "ollama-local") providerLabel = "Local Ollama";
 
   const token = fetchGatewayAuthTokenFromSandbox(sandboxName);
