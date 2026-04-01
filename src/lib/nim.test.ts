@@ -215,7 +215,7 @@ describe("nim", () => {
           const st = nimModule.nimStatusByName("foo");
           const commands = runCapture.mock.calls.map(([cmd]: [string]) => cmd);
 
-          expect(st).toMatchObject({ running: true, healthy: true });
+          expect(st).toMatchObject({ running: true, healthy: true, container: "foo", state: "running" });
           expect(commands.some((cmd: string) => cmd.includes("docker port"))).toBe(true);
         } finally {
           restore();
@@ -234,7 +234,7 @@ describe("nim", () => {
 
       try {
         const st = nimModule.nimStatusByName("foo");
-        expect(st).toMatchObject({ running: true, healthy: true });
+        expect(st).toMatchObject({ running: true, healthy: true, container: "foo", state: "running" });
       } finally {
         restore();
       }
@@ -249,7 +249,7 @@ describe("nim", () => {
 
       try {
         const st = nimModule.nimStatusByName("foo");
-        expect(st).toMatchObject({ running: false, healthy: false, state: "exited" });
+        expect(st).toMatchObject({ running: false, healthy: false, container: "foo", state: "exited" });
         expect(runCapture.mock.calls).toHaveLength(1);
       } finally {
         restore();
