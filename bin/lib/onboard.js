@@ -1627,8 +1627,10 @@ async function startGatewayWithOptions(_gpu, { exitOnFailure = true } = {}) {
     try {
       const kh = fs.readFileSync(knownHostsPath, "utf8");
       const cleaned = kh.split("\n").filter(l => {
-        const host = l.split(/\s/)[0] || "";
-        return !host.includes("openshell-");
+        const trimmed = l.trim();
+        if (!trimmed || trimmed.startsWith("#")) return true;
+        const hostField = trimmed.split(/\s+/)[0];
+        return !hostField.split(",").some(h => h.startsWith("openshell-"));
       }).join("\n");
       if (cleaned !== kh) fs.writeFileSync(knownHostsPath, cleaned);
     } catch {}
