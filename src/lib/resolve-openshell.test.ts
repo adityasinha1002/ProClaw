@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { describe, it, expect } from "vitest";
-import { resolveOpenshell } from "../../dist/lib/resolve-openshell.js";
+import { resolveOpenshell } from "../../dist/lib/resolve-openshell";
 
 describe("lib/resolve-openshell", () => {
   it("returns command -v result when absolute path", () => {
