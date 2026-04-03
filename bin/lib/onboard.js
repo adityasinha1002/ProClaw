@@ -3116,76 +3116,90 @@ async function setupInference(
 
 // ── Step 6: Messaging channels ───────────────────────────────────
 
+const MESSAGING_CHANNELS = [
+  {
+    name: "telegram",
+    envKey: "TELEGRAM_BOT_TOKEN",
+    description: "Telegram bot messaging",
+    help: "Create a bot via @BotFather on Telegram, then copy the token.",
+    label: "Telegram Bot Token",
+  },
+  {
+    name: "discord",
+    envKey: "DISCORD_BOT_TOKEN",
+    description: "Discord bot messaging",
+    help: "Discord Developer Portal → Applications → Bot → Reset/Copy Token.",
+    label: "Discord Bot Token",
+  },
+  {
+    name: "slack",
+    envKey: "SLACK_BOT_TOKEN",
+    description: "Slack bot messaging",
+    help: "Slack API → Your Apps → OAuth & Permissions → Bot User OAuth Token (xoxb-...).",
+    label: "Slack Bot Token",
+  },
+];
+
 async function setupMessagingChannels() {
   step(6, 8, "Messaging channels");
 
   const getMessagingToken = (envKey) =>
     getCredential(envKey) || normalizeCredentialValue(process.env[envKey]) || null;
 
-  // Skip if tokens are already configured or we're non-interactive
-  if (
-    isNonInteractive() ||
-    process.env.NEMOCLAW_NON_INTERACTIVE === "1" ||
-    getMessagingToken("TELEGRAM_BOT_TOKEN") ||
-    getMessagingToken("DISCORD_BOT_TOKEN") ||
-    getMessagingToken("SLACK_BOT_TOKEN")
-  ) {
-    if (
-      getMessagingToken("TELEGRAM_BOT_TOKEN") ||
-      getMessagingToken("DISCORD_BOT_TOKEN") ||
-      getMessagingToken("SLACK_BOT_TOKEN")
-    ) {
-      const found = [
-        getMessagingToken("TELEGRAM_BOT_TOKEN") && "telegram",
-        getMessagingToken("DISCORD_BOT_TOKEN") && "discord",
-        getMessagingToken("SLACK_BOT_TOKEN") && "slack",
-      ].filter(Boolean);
-      console.log(`  Messaging tokens already configured: ${found.join(", ")}`);
+  // Non-interactive: skip prompt, tokens come from env/credentials
+  if (isNonInteractive() || process.env.NEMOCLAW_NON_INTERACTIVE === "1") {
+    const found = MESSAGING_CHANNELS.filter((c) => getMessagingToken(c.envKey)).map((c) => c.name);
+    if (found.length > 0) {
+      note(`  [non-interactive] Messaging tokens detected: ${found.join(", ")}`);
     } else {
-      note("  No messaging tokens configured. Skipping.");
+      note("  [non-interactive] No messaging tokens configured. Skipping.");
     }
     return;
   }
 
-  console.log("  Connect Telegram, Discord, or Slack so your assistant can");
-  console.log("  send and receive messages. Tokens are stored securely and");
-  console.log("  never exposed inside the sandbox.");
-  console.log("  Press Enter to skip any channel you don't need.");
+  // Show available channels with ●/○ markers (same UX as policy presets)
   console.log("");
-
-  // Telegram
-  console.log("  Telegram: Create a bot via @BotFather on Telegram, then copy the token.");
-  const tgInput = normalizeCredentialValue(
-    await prompt("  Telegram Bot Token (Enter to skip): ", { secret: true }),
-  );
-  if (tgInput) {
-    saveCredential("TELEGRAM_BOT_TOKEN", tgInput);
-    process.env.TELEGRAM_BOT_TOKEN = tgInput;
-    console.log("  ✓ Telegram token saved");
+  console.log("  Available messaging channels:");
+  for (const ch of MESSAGING_CHANNELS) {
+    const hasToken = !!getMessagingToken(ch.envKey);
+    const marker = hasToken ? "●" : "○";
+    const status = hasToken ? " (token configured)" : "";
+    console.log(`    ${marker} ${ch.name} — ${ch.description}${status}`);
   }
   console.log("");
 
-  // Discord
-  console.log("  Discord: Developer Portal → Applications → Bot → Reset/Copy Token.");
-  const dcInput = normalizeCredentialValue(
-    await prompt("  Discord Bot Token (Enter to skip): ", { secret: true }),
-  );
-  if (dcInput) {
-    saveCredential("DISCORD_BOT_TOKEN", dcInput);
-    process.env.DISCORD_BOT_TOKEN = dcInput;
-    console.log("  ✓ Discord token saved");
-  }
-  console.log("");
+  const answer = await prompt("  Enable channels (comma-separated, or Enter to skip): ");
+  const selected = answer
+    .split(",")
+    .map((s) => s.trim().toLowerCase())
+    .filter(Boolean);
 
-  // Slack
-  console.log("  Slack: api.slack.com → Your Apps → OAuth & Permissions → Bot User OAuth Token.");
-  const slInput = normalizeCredentialValue(
-    await prompt("  Slack Bot Token (Enter to skip): ", { secret: true }),
-  );
-  if (slInput) {
-    saveCredential("SLACK_BOT_TOKEN", slInput);
-    process.env.SLACK_BOT_TOKEN = slInput;
-    console.log("  ✓ Slack token saved");
+  if (selected.length === 0) {
+    console.log("  Skipping messaging channels.");
+    return;
+  }
+
+  // For each selected channel, prompt for token if not already set
+  for (const name of selected) {
+    const ch = MESSAGING_CHANNELS.find((c) => c.name === name);
+    if (!ch) {
+      console.log(`  Unknown channel: ${name}`);
+      continue;
+    }
+    if (getMessagingToken(ch.envKey)) {
+      console.log(`  ✓ ${ch.name} — token already configured`);
+      continue;
+    }
+    console.log("");
+    console.log(`  ${ch.help}`);
+    const token = normalizeCredentialValue(await prompt(`  ${ch.label}: `, { secret: true }));
+    if (token) {
+      saveCredential(ch.envKey, token);
+      process.env[ch.envKey] = token;
+      console.log(`  ✓ ${ch.name} token saved`);
+    } else {
+      console.log(`  Skipped ${ch.name} (no token entered)`);
+    }
   }
   console.log("");
 }
