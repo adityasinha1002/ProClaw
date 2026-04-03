@@ -149,9 +149,9 @@ configure_messaging_channels() {
   [ -n "${TELEGRAM_BOT_TOKEN:-}" ] || [ -n "${DISCORD_BOT_TOKEN:-}" ] || [ -n "${SLACK_BOT_TOKEN:-}" ] || return 0
 
   if [ "$(id -u)" -ne 0 ]; then
-    echo "[channels] ERROR: Messaging tokens detected but running as non-root — cannot patch openclaw.json" >&2
-    echo "[channels] Messaging requires root to modify the immutable config. Recreate the sandbox or remove messaging tokens." >&2
-    return 1
+    echo "[channels] Messaging tokens detected but running as non-root — skipping openclaw.json patch" >&2
+    echo "[channels] Channels still work via L7 proxy token rewriting (no config patch needed)" >&2
+    return 0
   fi
 
   local config_path="/sandbox/.openclaw/openclaw.json"
