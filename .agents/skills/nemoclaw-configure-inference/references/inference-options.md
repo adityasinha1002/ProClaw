@@ -1,25 +1,3 @@
----
-title:
-  page: "NemoClaw Inference Options"
-  nav: "Inference Options"
-description:
-  main: "Inference providers available during NemoClaw onboarding and how the routed inference model works."
-  agent: "Lists all inference providers offered during NemoClaw onboarding. Use when explaining which providers are available, what the onboard wizard presents, or how inference routing works."
-keywords: ["nemoclaw inference options", "nemoclaw onboarding providers", "nemoclaw inference routing"]
-topics: ["generative_ai", "ai_agents"]
-tags: ["openclaw", "openshell", "inference_routing", "nemoclaw"]
-content:
-  type: concept
-  difficulty: technical_beginner
-  audience: ["developer", "engineer"]
-status: published
----
-
-<!--
-  SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-  SPDX-License-Identifier: Apache-2.0
--->
-
 # Inference Options
 
 NemoClaw supports multiple inference providers.
@@ -49,7 +27,7 @@ Ollama appears when it is installed or running on the host.
 | Anthropic | Routes to the Anthropic Messages API. Set `ANTHROPIC_API_KEY`. | `claude-sonnet-4-6`, `claude-haiku-4-5`, `claude-opus-4-6` |
 | Other Anthropic-compatible endpoint | Routes to any server that implements the Anthropic Messages API (`/v1/messages`). The wizard prompts for a base URL and model name. Set `COMPATIBLE_ANTHROPIC_API_KEY`. | You provide the model name. |
 | Google Gemini | Routes to Google's OpenAI-compatible endpoint. Set `GEMINI_API_KEY`. | `gemini-3.1-pro-preview`, `gemini-3.1-flash-lite-preview`, `gemini-3-flash-preview`, `gemini-2.5-pro`, `gemini-2.5-flash`, `gemini-2.5-flash-lite` |
-| Local Ollama | Routes to a local Ollama instance on `localhost:11434`. NemoClaw detects installed models, offers starter models if none are present, pulls and warms the selected model, and validates it. | Selected during onboarding. For more information, refer to [Use a Local Inference Server](use-local-inference.md). |
+| Local Ollama | Routes to a local Ollama instance on `localhost:11434`. NemoClaw detects installed models, offers starter models if none are present, pulls and warms the selected model, and validates it. | Selected during onboarding. For more information, refer to Use a Local Inference Server (see the `nemoclaw-configure-inference` skill). |
 
 ## Experimental Options
 
@@ -60,7 +38,7 @@ The following local inference options require `NEMOCLAW_EXPERIMENTAL=1` and, whe
 | Local NVIDIA NIM | NIM-capable GPU detected | Pulls and manages a NIM container. |
 | Local vLLM | vLLM running on `localhost:8000` | Auto-detects the loaded model. |
 
-For setup instructions, refer to [Use a Local Inference Server](use-local-inference.md).
+For setup instructions, refer to Use a Local Inference Server (see the `nemoclaw-configure-inference` skill).
 
 ## Validation
 
@@ -76,5 +54,5 @@ If validation fails, the wizard returns to provider selection.
 
 ## Next Steps
 
-- [Use a Local Inference Server](use-local-inference.md) for Ollama, vLLM, NIM, and compatible-endpoint setup details.
-- [Switch Inference Models](switch-inference-providers.md) for changing the model at runtime without re-onboarding.
+- Use a Local Inference Server (see the `nemoclaw-configure-inference` skill) for Ollama, vLLM, NIM, and compatible-endpoint setup details.
+- Switch Inference Models (see the `nemoclaw-configure-inference` skill) for changing the model at runtime without re-onboarding.

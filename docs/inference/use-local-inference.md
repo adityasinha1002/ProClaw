@@ -70,7 +70,7 @@ If `NEMOCLAW_MODEL` is not set, NemoClaw selects a default model based on availa
 
 ## OpenAI-Compatible Server
 
-This is the most flexible path and works with any server that implements `/v1/chat/completions`, including vLLM, TensorRT-LLM, llama.cpp, LocalAI, and others.
+This option works with any server that implements `/v1/chat/completions`, including vLLM, TensorRT-LLM, llama.cpp, LocalAI, and others.
 
 Start your model server.
 The examples below use vLLM, but any OpenAI-compatible server works.
@@ -210,7 +210,7 @@ $ openshell inference set --provider compatible-endpoint --model <model-name>
 
 If the provider itself needs to change (for example, switching from vLLM to a cloud API), rerun `nemoclaw onboard`.
 
-## Related Topics
+## Next Steps
 
 - [Inference Options](inference-options.md) for the full list of providers available during onboarding.
 - [Switch Inference Models](switch-inference-providers.md) for runtime model switching.
