@@ -827,7 +827,14 @@ install_nemoclaw() {
     spin "Installing NemoClaw dependencies" bash -c "cd \"$NEMOCLAW_SOURCE_ROOT\" && npm install --ignore-scripts"
     spin "Building NemoClaw CLI modules" bash -c "cd \"$NEMOCLAW_SOURCE_ROOT\" && npm run --if-present build:cli"
     spin "Building NemoClaw plugin" bash -c "cd \"$NEMOCLAW_SOURCE_ROOT\"/nemoclaw && npm install --ignore-scripts && npm run build"
-    spin "Linking NemoClaw CLI" bash -c "cd \"$NEMOCLAW_SOURCE_ROOT\" && npm link"
+    # Use sudo for npm link only when the global prefix is not writable
+    local npm_global_prefix
+    npm_global_prefix="$(npm config get prefix 2>/dev/null)" || true
+    local sudo_cmd=""
+    if [ -n "$npm_global_prefix" ] && [ ! -w "$npm_global_prefix" ] && [ "$(id -u)" -ne 0 ]; then
+      sudo_cmd="sudo"
+    fi
+    spin "Linking NemoClaw CLI" bash -c "cd \"$NEMOCLAW_SOURCE_ROOT\" && $sudo_cmd npm link"
   else
     info "Installing NemoClaw from GitHub…"
     # Resolve the latest release tag so we never install raw main.
@@ -855,7 +862,14 @@ install_nemoclaw() {
     spin "Installing NemoClaw dependencies" bash -c "cd \"$nemoclaw_src\" && npm install --ignore-scripts"
     spin "Building NemoClaw CLI modules" bash -c "cd \"$nemoclaw_src\" && npm run --if-present build:cli"
     spin "Building NemoClaw plugin" bash -c "cd \"$nemoclaw_src\"/nemoclaw && npm install --ignore-scripts && npm run build"
-    spin "Linking NemoClaw CLI" bash -c "cd \"$nemoclaw_src\" && npm link"
+    # Use sudo for npm link only when the global prefix is not writable
+    local npm_global_prefix
+    npm_global_prefix="$(npm config get prefix 2>/dev/null)" || true
+    local sudo_cmd=""
+    if [ -n "$npm_global_prefix" ] && [ ! -w "$npm_global_prefix" ] && [ "$(id -u)" -ne 0 ]; then
+      sudo_cmd="sudo"
+    fi
+    spin "Linking NemoClaw CLI" bash -c "cd \"$nemoclaw_src\" && $sudo_cmd npm link"
   fi
 
   refresh_path

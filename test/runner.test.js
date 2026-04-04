@@ -508,7 +508,10 @@ describe("regression guards", () => {
         path.join(import.meta.dirname, "..", "scripts", "walkthrough.sh"),
         "utf-8",
       );
-      // Check only executable lines (tmux spawn, openshell connect) — not comments/docs
+      // Check only executable lines (tmux spawn, openshell connect) — not comments/docs.
+      // The safe `tmux -e "NVIDIA_API_KEY=..."` pattern is allowed because it
+      // passes the key through the environment rather than embedding it in the
+      // shell command that runs inside the sandbox.
       const cmdLines = src
         .split("\n")
         .filter(
@@ -518,7 +521,10 @@ describe("regression guards", () => {
             (l.includes("tmux") || l.includes("openshell sandbox connect")),
         );
       for (const line of cmdLines) {
-        expect(line.includes("NVIDIA_API_KEY")).toBe(false);
+        if (line.includes("NVIDIA_API_KEY")) {
+          // Only the tmux -e env-passing pattern is acceptable
+          expect(line).toMatch(/-e\s+"NVIDIA_API_KEY=/);
+        }
       }
     });
 

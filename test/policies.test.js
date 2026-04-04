@@ -93,9 +93,9 @@ selectFromList(items, options)
 
 describe("policies", () => {
   describe("listPresets", () => {
-    it("returns all 9 presets", () => {
+    it("returns all 10 presets", () => {
       const presets = policies.listPresets();
-      expect(presets.length).toBe(9);
+      expect(presets.length).toBe(10);
     });
 
     it("each preset has name and description", () => {
@@ -115,6 +115,7 @@ describe("policies", () => {
         "docker",
         "huggingface",
         "jira",
+        "local-inference",
         "npm",
         "outlook",
         "pypi",
@@ -164,6 +165,33 @@ describe("policies", () => {
         const hosts = policies.getPresetEndpoints(content);
         expect(hosts.length > 0).toBeTruthy();
       }
+    });
+  });
+
+  describe("local-inference preset", () => {
+    it("loads and contains host.openshell.internal", () => {
+      const content = policies.loadPreset("local-inference");
+      expect(content).toBeTruthy();
+      const hosts = policies.getPresetEndpoints(content);
+      expect(hosts.includes("host.openshell.internal")).toBeTruthy();
+    });
+
+    it("allows Ollama port 11434 and vLLM port 8000", () => {
+      const content = policies.loadPreset("local-inference");
+      expect(content.includes("port: 11434")).toBe(true);
+      expect(content.includes("port: 8000")).toBe(true);
+    });
+
+    it("has a binaries section", () => {
+      const content = policies.loadPreset("local-inference");
+      expect(content.includes("binaries:")).toBe(true);
+    });
+
+    it("extracts valid network_policies entries", () => {
+      const content = policies.loadPreset("local-inference");
+      const entries = policies.extractPresetEntries(content);
+      expect(entries).toBeTruthy();
+      expect(entries.includes("local_inference")).toBe(true);
     });
   });
 

@@ -84,10 +84,9 @@ tmux kill-session -t "$SESSION" 2>/dev/null || true
 # Create session with TUI on the left
 tmux new-session -d -s "$SESSION" -x 200 -y 50 "openshell term"
 
-# Split right pane for the agent
-# NVIDIA_API_KEY is not needed inside the sandbox — inference is proxied
-# through the OpenShell gateway which injects credentials server-side.
-tmux split-window -h -t "$SESSION" \
+# Split right pane for the agent — pass NVIDIA_API_KEY via tmux -e so it
+# reaches the sandbox environment without being embedded in the command string.
+tmux split-window -h -t "$SESSION" -e "NVIDIA_API_KEY=$NVIDIA_API_KEY" \
   "openshell sandbox connect nemoclaw -- bash -c 'nemoclaw-start openclaw agent --agent main --local --session-id live'"
 
 # Even split

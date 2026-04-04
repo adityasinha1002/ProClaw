@@ -3030,10 +3030,18 @@ async function setupOpenclaw(sandboxName, model, provider) {
 // ── Step 7: Policy presets ───────────────────────────────────────
 
 // eslint-disable-next-line complexity
-async function _setupPolicies(sandboxName) {
+async function _setupPolicies(sandboxName, provider = null) {
   step(7, 7, "Policy presets");
 
   const suggestions = ["pypi", "npm"];
+
+  // Auto-detect local inference — sandbox needs host gateway egress
+  const sandbox = registry.getSandbox(sandboxName);
+  const sandboxProvider = provider || (sandbox ? sandbox.provider : null);
+  if (sandboxProvider === "ollama-local" || sandboxProvider === "vllm-local") {
+    suggestions.push("local-inference");
+    console.log(`  Auto-detected: ${sandboxProvider} → suggesting local-inference preset`);
+  }
 
   // Auto-detect based on env tokens
   if (getCredential("TELEGRAM_BOT_TOKEN")) {
@@ -3182,6 +3190,7 @@ function arePolicyPresetsApplied(sandboxName, selectedPresets = []) {
 async function setupPoliciesWithSelection(sandboxName, options = {}) {
   const selectedPresets = Array.isArray(options.selectedPresets) ? options.selectedPresets : null;
   const onSelection = typeof options.onSelection === "function" ? options.onSelection : null;
+  const provider = options.provider || null;
 
   step(7, 7, "Policy presets");
 
@@ -3190,6 +3199,14 @@ async function setupPoliciesWithSelection(sandboxName, options = {}) {
   if (getCredential("SLACK_BOT_TOKEN") || process.env.SLACK_BOT_TOKEN) suggestions.push("slack");
   if (getCredential("DISCORD_BOT_TOKEN") || process.env.DISCORD_BOT_TOKEN)
     suggestions.push("discord");
+
+  // Auto-detect local inference — sandbox needs host gateway egress
+  const sandbox = registry.getSandbox(sandboxName);
+  const sandboxProvider = provider || (sandbox ? sandbox.provider : null);
+  if (sandboxProvider === "ollama-local" || sandboxProvider === "vllm-local") {
+    suggestions.push("local-inference");
+    console.log(`  Auto-detected: ${sandboxProvider} → suggesting local-inference preset`);
+  }
 
   const allPresets = policies.listPresets();
   const applied = policies.getAppliedPresets(sandboxName);
@@ -3748,6 +3765,7 @@ async function onboard(opts = {}) {
         policyPresets: recordedPolicyPresets || [],
       });
       const appliedPolicyPresets = await setupPoliciesWithSelection(sandboxName, {
+        provider,
         selectedPresets:
           resume &&
           session?.steps?.policies?.status !== "complete" &&
