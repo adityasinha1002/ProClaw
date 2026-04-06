@@ -42,19 +42,19 @@ describe("local inference helpers", () => {
   });
 
   it("returns the expected validation URL for vllm-local", () => {
-    expect(getLocalProviderValidationBaseUrl("vllm-local")).toBe("http://localhost:8000/v1");
+    expect(getLocalProviderValidationBaseUrl("vllm-local")).toBe("http://127.0.0.1:8000/v1");
   });
 
   it("returns the expected health check command for ollama-local", () => {
     expect(getLocalProviderHealthCheck("ollama-local")).toBe(
-      "curl -sf http://localhost:11434/api/tags 2>/dev/null",
+      "curl -sf http://127.0.0.1:11434/api/tags 2>/dev/null",
     );
   });
 
   it("returns the expected validation and health check commands for vllm-local", () => {
-    expect(getLocalProviderValidationBaseUrl("ollama-local")).toBe("http://localhost:11434/v1");
+    expect(getLocalProviderValidationBaseUrl("ollama-local")).toBe("http://127.0.0.1:11434/v1");
     expect(getLocalProviderHealthCheck("vllm-local")).toBe(
-      "curl -sf http://localhost:8000/v1/models 2>/dev/null",
+      "curl -sf http://127.0.0.1:8000/v1/models 2>/dev/null",
     );
     expect(getLocalProviderContainerReachabilityCheck("vllm-local")).toBe(
       `docker run --rm --add-host host.openshell.internal:host-gateway ${CONTAINER_REACHABILITY_IMAGE} -sf http://host.openshell.internal:8000/v1/models 2>/dev/null`,
@@ -80,7 +80,7 @@ describe("local inference helpers", () => {
   it("returns a clear error when ollama-local is unavailable", () => {
     const result = validateLocalProvider("ollama-local", () => "");
     expect(result.ok).toBe(false);
-    expect(result.message).toMatch(/http:\/\/localhost:11434/);
+    expect(result.message).toMatch(/http:\/\/127.0.0.1:11434/);
   });
 
   it("returns a clear error when ollama-local is not reachable from containers", () => {
@@ -97,7 +97,7 @@ describe("local inference helpers", () => {
   it("returns a clear error when vllm-local is unavailable", () => {
     const result = validateLocalProvider("vllm-local", () => "");
     expect(result.ok).toBe(false);
-    expect(result.message).toMatch(/http:\/\/localhost:8000/);
+    expect(result.message).toMatch(/http:\/\/127.0.0.1:8000/);
   });
 
   it("returns a clear error when vllm-local is not reachable from containers", () => {
@@ -210,7 +210,7 @@ describe("local inference helpers", () => {
 
   it("builds a background warmup command for ollama models", () => {
     const command = getOllamaWarmupCommand("nemotron-3-nano:30b");
-    expect(command).toMatch(/^nohup curl -s http:\/\/localhost:11434\/api\/generate /);
+    expect(command).toMatch(/^nohup curl -s http:\/\/127.0.0.1:11434\/api\/generate /);
     expect(command).toMatch(/"model":"nemotron-3-nano:30b"/);
     expect(command).toMatch(/"keep_alive":"15m"/);
   });
@@ -223,7 +223,7 @@ describe("local inference helpers", () => {
 
   it("builds a foreground probe command for ollama models", () => {
     const command = getOllamaProbeCommand("nemotron-3-nano:30b");
-    expect(command).toMatch(/^curl -sS --max-time 120 http:\/\/localhost:11434\/api\/generate /);
+    expect(command).toMatch(/^curl -sS --max-time 120 http:\/\/127.0.0.1:11434\/api\/generate /);
     expect(command).toMatch(/"model":"nemotron-3-nano:30b"/);
   });
 
