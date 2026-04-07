@@ -69,6 +69,26 @@ describe("onboard command", () => {
     });
   });
 
+  it("prints usage and skips onboarding for --help", async () => {
+    const runOnboard = vi.fn(async () => {});
+    const lines: string[] = [];
+    await runOnboardCommand({
+      args: ["--help"],
+      noticeAcceptFlag: "--yes-i-accept-third-party-software",
+      noticeAcceptEnv: "NEMOCLAW_ACCEPT_THIRD_PARTY_SOFTWARE",
+      env: {},
+      runOnboard,
+      log: (message = "") => lines.push(message),
+      error: () => {},
+      exit: ((code: number) => {
+        throw new Error(String(code));
+      }) as never,
+    });
+    expect(runOnboard).not.toHaveBeenCalled();
+    expect(lines.join("\n")).toContain("Usage: nemoclaw onboard");
+    expect(lines.join("\n")).toContain("--from <Dockerfile>");
+  });
+
   it("parses --from <Dockerfile>", () => {
     expect(
       parseOnboardArgs(

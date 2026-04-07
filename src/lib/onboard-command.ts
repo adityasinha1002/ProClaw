@@ -21,8 +21,22 @@ export interface RunOnboardCommandDeps {
 
 const ONBOARD_BASE_ARGS = ["--non-interactive", "--resume"];
 
-function onboardUsage(noticeAcceptFlag: string): string {
-  return `  Usage: nemoclaw onboard [--non-interactive] [--resume] [--from <Dockerfile>] [${noticeAcceptFlag}]`;
+function onboardUsageLines(noticeAcceptFlag: string): string[] {
+  return [
+    `  Usage: nemoclaw onboard [--non-interactive] [--resume] [--from <Dockerfile>] [${noticeAcceptFlag}]`,
+    "",
+    "  Options:",
+    "    --non-interactive                  Run without prompts",
+    "    --resume                           Resume a saved onboarding session",
+    "    --from <Dockerfile>                Build the sandbox image from a Dockerfile",
+    `    ${noticeAcceptFlag}  Accept the third-party software notice for non-interactive runs`,
+  ];
+}
+
+function printOnboardUsage(writer: (message?: string) => void, noticeAcceptFlag: string): void {
+  for (const line of onboardUsageLines(noticeAcceptFlag)) {
+    writer(line);
+  }
 }
 
 export function parseOnboardArgs(
@@ -39,7 +53,7 @@ export function parseOnboardArgs(
     fromDockerfile = args[fromIdx + 1] || null;
     if (!fromDockerfile || fromDockerfile.startsWith("--")) {
       error("  --from requires a path to a Dockerfile");
-      error(onboardUsage(noticeAcceptFlag));
+      printOnboardUsage(error, noticeAcceptFlag);
       exit(1);
     }
     args = [...args.slice(0, fromIdx), ...args.slice(fromIdx + 2)];
@@ -49,7 +63,7 @@ export function parseOnboardArgs(
   const unknownArgs = args.filter((arg) => !allowedArgs.has(arg));
   if (unknownArgs.length > 0) {
     error(`  Unknown onboard option(s): ${unknownArgs.join(", ")}`);
-    error(onboardUsage(noticeAcceptFlag));
+    printOnboardUsage(error, noticeAcceptFlag);
     exit(1);
   }
 
@@ -63,6 +77,12 @@ export function parseOnboardArgs(
 }
 
 export async function runOnboardCommand(deps: RunOnboardCommandDeps): Promise<void> {
+  const log = deps.log ?? console.log;
+  if (deps.args.includes("--help") || deps.args.includes("-h")) {
+    printOnboardUsage(log, deps.noticeAcceptFlag);
+    return;
+  }
+
   const options = parseOnboardArgs(deps.args, deps.noticeAcceptFlag, deps.noticeAcceptEnv, deps);
   await deps.runOnboard(options);
 }
