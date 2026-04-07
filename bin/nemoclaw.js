@@ -48,6 +48,7 @@ const {
   stripAnsi,
   versionGte,
 } = require("../dist/lib/openshell");
+const { listSandboxesCommand, showStatusCommand } = require("../dist/lib/inventory-commands");
 const { executeDeploy } = require("../dist/lib/deploy");
 const { runStartCommand, runStopCommand } = require("../dist/lib/services-command");
 
@@ -901,76 +902,24 @@ function uninstall(args) {
 }
 
 function showStatus() {
-  // Show sandbox registry
-  const { sandboxes, defaultSandbox } = registry.listSandboxes();
-  if (sandboxes.length > 0) {
-    const live = parseGatewayInference(
-      captureOpenshell(["inference", "get"], { ignoreError: true }).output,
-    );
-    console.log("");
-    console.log("  Sandboxes:");
-    for (const sb of sandboxes) {
-      const def = sb.name === defaultSandbox ? " *" : "";
-      const model = (live && live.model) || sb.model;
-      console.log(`    ${sb.name}${def}${model ? ` (${model})` : ""}`);
-    }
-    console.log("");
-  }
-
-  // Show service status
   const { showStatus: showServiceStatus } = require("./lib/services");
-  showServiceStatus({ sandboxName: defaultSandbox || undefined });
+  showStatusCommand({
+    listSandboxes: () => registry.listSandboxes(),
+    getLiveInference: () =>
+      parseGatewayInference(captureOpenshell(["inference", "get"], { ignoreError: true }).output),
+    showServiceStatus,
+    log: console.log,
+  });
 }
 
 async function listSandboxes() {
-  const recovery = await recoverRegistryEntries();
-  const { sandboxes, defaultSandbox } = recovery;
-  if (sandboxes.length === 0) {
-    console.log("");
-    const session = onboardSession.loadSession();
-    if (session?.sandboxName) {
-      console.log(
-        `  No sandboxes registered locally, but the last onboarded sandbox was '${session.sandboxName}'.`,
-      );
-      console.log(
-        "  Retry `nemoclaw <name> connect` or `nemoclaw <name> status` once the gateway/runtime is healthy.",
-      );
-    } else {
-      console.log("  No sandboxes registered. Run `nemoclaw onboard` to get started.");
-    }
-    console.log("");
-    return;
-  }
-
-  // Query live gateway inference once; prefer it over stale registry values.
-  const live = parseGatewayInference(
-    captureOpenshell(["inference", "get"], { ignoreError: true }).output,
-  );
-
-  console.log("");
-  if (recovery.recoveredFromSession) {
-    console.log("  Recovered sandbox inventory from the last onboard session.");
-    console.log("");
-  }
-  if (recovery.recoveredFromGateway > 0) {
-    console.log(
-      `  Recovered ${recovery.recoveredFromGateway} sandbox entr${recovery.recoveredFromGateway === 1 ? "y" : "ies"} from the live OpenShell gateway.`,
-    );
-    console.log("");
-  }
-  console.log("  Sandboxes:");
-  for (const sb of sandboxes) {
-    const def = sb.name === defaultSandbox ? " *" : "";
-    const model = (live && live.model) || sb.model || "unknown";
-    const provider = (live && live.provider) || sb.provider || "unknown";
-    const gpu = sb.gpuEnabled ? "GPU" : "CPU";
-    const presets = sb.policies && sb.policies.length > 0 ? sb.policies.join(", ") : "none";
-    console.log(`    ${sb.name}${def}`);
-    console.log(`      model: ${model}  provider: ${provider}  ${gpu}  policies: ${presets}`);
-  }
-  console.log("");
-  console.log("  * = default sandbox");
-  console.log("");
+  await listSandboxesCommand({
+    recoverRegistryEntries: () => recoverRegistryEntries(),
+    getLiveInference: () =>
+      parseGatewayInference(captureOpenshell(["inference", "get"], { ignoreError: true }).output),
+    loadLastSession: () => onboardSession.loadSession(),
+    log: console.log,
+  });
 }
 
 // ── Sandbox-scoped actions ───────────────────────────────────────
