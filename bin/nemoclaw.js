@@ -51,6 +51,10 @@ const {
 const { listSandboxesCommand, showStatusCommand } = require("../dist/lib/inventory-commands");
 const { executeDeploy } = require("../dist/lib/deploy");
 const { runStartCommand, runStopCommand } = require("../dist/lib/services-command");
+const {
+  buildVersionedUninstallUrl,
+  runUninstallCommand,
+} = require("../dist/lib/uninstall-command");
 
 // ── Global commands ──────────────────────────────────────────────
 
@@ -72,8 +76,7 @@ const GLOBAL_COMMANDS = new Set([
   "-v",
 ]);
 
-const REMOTE_UNINSTALL_URL =
-  "https://raw.githubusercontent.com/NVIDIA/NemoClaw/refs/heads/main/uninstall.sh";
+const REMOTE_UNINSTALL_URL = buildVersionedUninstallUrl(getVersion());
 let OPENSHELL_BIN = null;
 const MIN_LOGS_OPENSHELL_VERSION = "0.0.7";
 const NEMOCLAW_GATEWAY_NAME = "nemoclaw";
@@ -735,18 +738,6 @@ function printOldLogsCompatibilityGuidance(installedVersion = null) {
   );
 }
 
-function resolveUninstallScript() {
-  const candidates = [path.join(ROOT, "uninstall.sh"), path.join(__dirname, "..", "uninstall.sh")];
-
-  for (const candidate of candidates) {
-    if (fs.existsSync(candidate)) {
-      return candidate;
-    }
-  }
-
-  return null;
-}
-
 function exitWithSpawnResult(result) {
   if (result.status !== null) {
     process.exit(result.status);
@@ -861,45 +852,18 @@ function debug(args) {
 }
 
 function uninstall(args) {
-  const localScript = resolveUninstallScript();
-  if (localScript) {
-    console.log(`  Running local uninstall script: ${localScript}`);
-    const result = spawnSync("bash", [localScript, ...args], {
-      stdio: "inherit",
-      cwd: ROOT,
-      env: process.env,
-    });
-    exitWithSpawnResult(result);
-  }
-
-  // Download to file before execution — prevents partial-download execution.
-  // Upstream URL is a rolling release so SHA-256 pinning isn't practical.
-  console.log(`  Local uninstall script not found; falling back to ${REMOTE_UNINSTALL_URL}`);
-  const uninstallDir = fs.mkdtempSync(path.join(os.tmpdir(), "nemoclaw-uninstall-"));
-  const uninstallScript = path.join(uninstallDir, "uninstall.sh");
-  let result;
-  let downloadFailed = false;
-  try {
-    try {
-      execFileSync("curl", ["-fsSL", REMOTE_UNINSTALL_URL, "-o", uninstallScript], {
-        stdio: "inherit",
-      });
-    } catch {
-      console.error(`  Failed to download uninstall script from ${REMOTE_UNINSTALL_URL}`);
-      downloadFailed = true;
-    }
-    if (!downloadFailed) {
-      result = spawnSync("bash", [uninstallScript, ...args], {
-        stdio: "inherit",
-        cwd: ROOT,
-        env: process.env,
-      });
-    }
-  } finally {
-    fs.rmSync(uninstallDir, { recursive: true, force: true });
-  }
-  if (downloadFailed) process.exit(1);
-  exitWithSpawnResult(result);
+  runUninstallCommand({
+    args,
+    rootDir: ROOT,
+    currentDir: __dirname,
+    remoteScriptUrl: REMOTE_UNINSTALL_URL,
+    env: process.env,
+    spawnSyncImpl: spawnSync,
+    execFileSyncImpl: execFileSync,
+    log: console.log,
+    error: console.error,
+    exit: (code) => process.exit(code),
+  });
 }
 
 function showStatus() {
