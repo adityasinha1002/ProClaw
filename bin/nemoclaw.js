@@ -46,6 +46,7 @@ const {
   runDeprecatedOnboardAliasCommand,
   runOnboardCommand,
 } = require("../dist/lib/onboard-command");
+const { runStartCommand, runStopCommand } = require("../dist/lib/services-command");
 
 // ── Global commands ──────────────────────────────────────────────
 
@@ -854,18 +855,18 @@ async function deploy(instanceName) {
 
 async function start() {
   const { startAll } = require("./lib/services");
-  const { defaultSandbox } = registry.listSandboxes();
-  const safeName =
-    defaultSandbox && /^[a-zA-Z0-9._-]+$/.test(defaultSandbox) ? defaultSandbox : null;
-  await startAll({ sandboxName: safeName || undefined });
+  await runStartCommand({
+    listSandboxes: () => registry.listSandboxes(),
+    startAll,
+  });
 }
 
 function stop() {
   const { stopAll } = require("./lib/services");
-  const { defaultSandbox } = registry.listSandboxes();
-  const safeName =
-    defaultSandbox && /^[a-zA-Z0-9._-]+$/.test(defaultSandbox) ? defaultSandbox : null;
-  stopAll({ sandboxName: safeName || undefined });
+  runStopCommand({
+    listSandboxes: () => registry.listSandboxes(),
+    stopAll,
+  });
 }
 
 function debug(args) {
